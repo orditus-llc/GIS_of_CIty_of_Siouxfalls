@@ -30,6 +30,16 @@ jobs:
           cp index.html Bus_Routes.geojson _site/
           touch _site/.nojekyll
 
+      - name: Inject Cesium ion token
+        env:
+          CESIUM_ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
+        run: |
+          if [ -z "$CESIUM_ION_TOKEN" ]; then
+            echo "::warning::CESIUM_ION_TOKEN secret not set - deploying with a flat globe."
+          else
+            sed -i "s|PASTE_YOUR_TOKEN_HERE|${CESIUM_ION_TOKEN}|" _site/index.html
+          fi
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 

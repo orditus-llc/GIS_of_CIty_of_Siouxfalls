@@ -1,29 +1,54 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Cesium Hello World</title>
-  <script src="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Cesium.js"></script>
-  <link href="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sioux Falls Bus Routes</title>
+
+  <!-- CesiumJS from a CDN, pinned to an exact version -->
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.146.0/Build/Cesium/Cesium.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/cesium@1.146.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
   <style>
-    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; }
+    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
+
   <script>
+    // Your Cesium ion token (ion.cesium.com -> Access Tokens).
+    // Leave the placeholder here in the repo: the GitHub Actions deploy
+    // replaces it with the CESIUM_ION_TOKEN repository secret.
+    // Anyone can read it on a public page, so in the ion dashboard
+    // restrict it to your GitHub Pages URL before publishing.
+    // Without a token you get a flat globe.
+    const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImNfaklPM3lXeExPYzZiamsiLCJqdGkiOiJiNjg4ODQyNS1jZWYzLTQ3MjctODkwNi1mNGEwNzQ4NjY1NGIiLCJpZCI6NTQ2NTQ0LCJzdWIiOiJMb3phIEthc3NhIiwiaXNzIjoiaHR0cHM6Ly9hcGkuY2VzaXVtLmNvbSIsImF1ZCI6InNpb3V4LWZhbGxzLXRva2VuIiwiaWF0IjoxNzk0MzMxODcyfQ.SJb5ivOu6sPpcfmd5i7meGTLsg_mDCBZ8ORoUauSuO8";
+    const hasToken = !token.startsWith("PASTE");
+    if (hasToken) Cesium.Ion.defaultAccessToken = token;
+
+    // The 3D globe: OpenStreetMap streets, draped over Cesium's world terrain
+    // when there's a token (a flat globe without one).
     const viewer = new Cesium.Viewer("cesiumContainer", {
+      terrain: hasToken ? Cesium.Terrain.fromWorldTerrain() : undefined,
       baseLayer: new Cesium.ImageryLayer(
         new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
       ),
       baseLayerPicker: false,
-      geocoder: false
     });
 
-    viewer.dataSources.add(Cesium.GeoJsonDataSource.load("Bus_Routes.geojson", {
-  stroke: Cesium.Color.CRIMSON,
-  strokeWidth: 4
-})).then(ds => viewer.zoomTo(ds));
+    // City of Sioux Falls bus routes, from the GeoJSON file deployed with this page.
+    // (Name is case-sensitive on GitHub Pages.)
+    const busRoutesUrl = "Bus_Routes.geojson";
+
+    Cesium.GeoJsonDataSource.load(busRoutesUrl, {
+      clampToGround: true,          // drape the lines on the terrain
+      stroke: Cesium.Color.RED,
+      strokeWidth: 4,
+    }).then((dataSource) => {
+      viewer.dataSources.add(dataSource);
+      viewer.flyTo(dataSource);     // zoom to Sioux Falls
+    });
   </script>
 </body>
 </html>
