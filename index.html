@@ -37,18 +37,114 @@
       baseLayerPicker: false,
     });
 
-    // City of Sioux Falls bus routes, from the GeoJSON file deployed with this page.
-    // (Name is case-sensitive on GitHub Pages.)
-    const busRoutesUrl = "Bus_Routes.geojson";
+     // ===== DOWNTOWN BUILDINGS =====
 
-    Cesium.GeoJsonDataSource.load(busRoutesUrl, {
-      clampToGround: true,          // drape the lines on the terrain
-      stroke: Cesium.Color.RED,
-      strokeWidth: 4,
-    }).then((dataSource) => {
-      viewer.dataSources.add(dataSource);
-      viewer.flyTo(dataSource);     // zoom to Sioux Falls
-    });
+    // Settings: the same City layers as get_buildings.py
+    const BOUNDARY_URL = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Community/MapServer/6";  // Downtown Business District
+    const LAYER_URL    = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Property/MapServer/5";   // Building footprints
+    const PAGE_SIZE = 1000;
+    const FT_TO_M = 0.3048;  // City heights are in feet; Cesium uses meters
+
+    // Ask a City layer a question (POST, because the boundary is too long for a URL)
+    async function query(layerUrl, params) {
+      const resp = await fetch(layerUrl + "/query", { method: "POST", body: new URLSearchParams(params) });
+      if (!resp.ok) throw new Error("Server responded " + resp.status);
+      return resp.json();
+    }
+
+    // Get the one Downtown Business District shape, in lat/lon
+    async function getBoundary() {
+      const result = await query(BOUNDARY_URL, { where: "1=1", outFields: "OBJECTID", outSR: 4326, f: "json" });
+      if (result.error) throw new Error("Boundary: " + result.error.message);
+      const n = result.features ? result.features.length : 0;
+      if (n !== 1) throw new Error(`Expected 1 boundary shape, got ${n}`);
+      return result.features[0].geometry;
+    }
+
+    // QGIS rule-based colors by NUMBERSTORIES
+    function storyColor(stories) {
+      if (stories == null)                return Cesium.Color.LIGHTGRAY;                      // Unknown (no story data)
+      if (stories >= 1 && stories <= 2)  return Cesium.Color.fromCssColorString("#c6dbef");  // 1–2 stories
+      if (stories >= 3 && stories <= 5)  return Cesium.Color.fromCssColorString("#6baed6");  // 3–5 stories
+      if (stories >= 6 && stories <= 8)  return Cesium.Color.fromCssColorString("#2171b5");  // 6–8 stories
+      if (stories >= 9 && stories <= 11) return Cesium.Color.fromCssColorString("#08306b");  // 9–11 stories
+      return Cesium.Color.LIGHTGRAY;
+    }
+
+    async function loadBuildings() {
+      // --- DOWNLOAD: buildings touching the downtown boundary, in lat/lon ---
+      const boundary = await getBoundary();
+      let features = [];
+      while (true) {
+        const page = await query(LAYER_URL, {
+          where: "1=1", outFields: "*", orderByFields: "OBJECTID",
+          resultOffset: features.length, resultRecordCount: PAGE_SIZE,
+          outSR: 4326, f: "geojson",
+          geometry: JSON.stringify(boundary), geometryType: "esriGeometryPolygon",
+          inSR: 4326, spatialRel: "esriSpatialRelIntersects"
+        });
+        if (page.error) throw new Error("Buildings: " + page.error.message);
+        const batch = page.features || [];
+        features.push(...batch);
+        if (batch.length < PAGE_SIZE) break;
+      }
+
+      // --- CLEAN: the QGIS Field Calculator steps (add new cleaning steps in this loop) ---
+      for (const f of features) {
+        const p = f.properties;
+
+        // OCCUPIEDDATE: milliseconds -> YYYY-MM-DD
+        if (typeof p.OCCUPIEDDATE === "number") {
+          p.OCCUPIEDDATE = new Date(p.OCCUPIEDDATE).toISOString().slice(0, 10);
+        }
+
+        // bldg_height = BUILDINGTOPELEVATION - GROUNDELEVATION, with the 233281 correction
+        if (p.OBJECTID === 233281) {
+          p.bldg_height = 42;  // City value 4.1 ft is wrong: 3-story townhomes (City photo 2019)
+        } else if (p.BUILDINGTOPELEVATION != null && p.GROUNDELEVATION != null) {
+          p.bldg_height = p.BUILDINGTOPELEVATION - p.GROUNDELEVATION;
+        } else {
+          p.bldg_height = null;
+        }
+
+        // height_flag CASE expression
+        if (p.STATUS === "Proposed" && p.BUILDINGTOPELEVATION == null) p.height_flag = "proposed_no_height";
+        else if (p.bldg_height == null) p.height_flag = "missing";
+        else p.height_flag = "measured";
+      }
+
+      // --- REMOVE BUILDINGS: put any features.filter(...) lines here ---
+
+      // Check against the QGIS results (expect 383 buildings: 379 measured, 4 proposed_no_height)
+      const counts = {};
+      for (const f of features) counts[f.properties.height_flag] = (counts[f.properties.height_flag] || 0) + 1;
+      console.log(features.length, "buildings", counts, "loaded", new Date().toISOString().slice(0, 10));
+
+      // --- DISPLAY: the QGIS 3D View steps, standing on the terrain ---
+      const ds = await Cesium.GeoJsonDataSource.load(
+        { type: "FeatureCollection", features },
+        { clampToGround: true }
+      );
+      for (const e of ds.entities.values) {
+        if (!e.polygon) continue;
+        const get = name => (e.properties[name] ? e.properties[name].getValue() : null);
+        const heightFt = get("bldg_height");
+
+        e.polygon.material = storyColor(get("NUMBERSTORIES"));
+        e.polygon.outline = false;                                         // outlines aren't supported on terrain
+        e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND; // base sits on the terrain
+        if (heightFt != null) {
+          e.polygon.extrudedHeight = heightFt * FT_TO_M;                   // QGIS "Extrusion", in meters
+          e.polygon.extrudedHeightReference = Cesium.HeightReference.RELATIVE_TO_GROUND;
+        }
+      }
+      viewer.dataSources.add(ds);
+
+      // Tilted camera, like QGIS "New 3D Map View"
+      viewer.zoomTo(ds, new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-35), 1500));
+    }
+
+    loadBuildings().catch(err => console.error(err));
   </script>
 </body>
 </html>
