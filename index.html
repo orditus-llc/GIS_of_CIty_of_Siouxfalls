@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <div id="panel">
   <title>City of Sioux Falls</title>
 
   <!-- CesiumJS from a CDN, pinned to an exact version -->
@@ -42,7 +43,28 @@
 </head>
 <body>
   <div id="cesiumContainer"></div>
-
+ <h3>Downtown Sioux Falls</h3>
+    <label>Color by
+      <select id="colorBy">
+        <option value="stories">Number of stories</option>
+        <option value="use">Use group</option>
+        <option value="owner">Ownership</option>
+        <option value="qa">Data quality</option>
+      </select>
+    </label>
+    <fieldset>
+      <legend>Show</legend>
+      <label><input type="checkbox" id="showAccessory" checked> Accessory structures</label>
+      <label><input type="checkbox" id="showProposed" checked> Proposed (no height)</label>
+      <label><input type="checkbox" id="showSmall" checked> Footprints under 150 sq ft</label>
+    </fieldset>
+    <label>Minimum height: <span id="minHeightLabel">0</span> ft
+      <input type="range" id="minHeight" min="0" max="170" step="5" value="0">
+    </label>
+    <label><input type="checkbox" id="shadows"> Sun shadows</label>
+    <div id="legend"></div>
+    <div id="count"></div>
+  </div>
   <script>
     // Your Cesium ion token (ion.cesium.com -> Access Tokens).
     // Leave the placeholder here in the repo: the GitHub Actions deploy
