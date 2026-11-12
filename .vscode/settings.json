@@ -1,0 +1,6 @@
+{
+  // The Cesium ion token only allows http://127.0.0.1:5500 locally (not localhost)
+  "liveServer.settings.host": "127.0.0.1",
+  "liveServer.settings.port": 5500,
+  "liveServer.settings.useLocalIp": false
+}

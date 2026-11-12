@@ -63,6 +63,7 @@
       <input type="range" id="minHeight" min="0" max="170" step="5" value="0">
     </label>
     <label><input type="checkbox" id="shadows"> Sun shadows</label>
+    <label><input type="checkbox" id="ambientOcclusion" checked> Soft corner shading</label>
     <div id="legend"></div>
     <div id="count"></div>
   </div>
@@ -86,13 +87,45 @@
 
     // The 3D globe: OpenStreetMap streets, draped over Cesium's world terrain
     // when there's a token (a flat globe without one).
+    const terrain = hasToken ? Cesium.Terrain.fromWorldTerrain() : undefined;
     const viewer = new Cesium.Viewer("cesiumContainer", {
-      terrain: hasToken ? Cesium.Terrain.fromWorldTerrain() : undefined,
+      terrain,
       baseLayer: new Cesium.ImageryLayer(
         new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
       ),
       baseLayerPicker: false,
     });
+
+    // ===== LOOK: sun lighting, soft corner shading, smooth edges =====
+    // A fixed late-afternoon sun so each wall gets its own shade (use the
+    // timeline at the bottom to move the sun; turn on "Sun shadows" to cast them).
+    viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-09-15T21:00:00Z");  // 4 pm CDT
+    viewer.clock.shouldAnimate = false;
+
+    // Anti-aliasing: smooths jagged building edges
+    viewer.scene.postProcessStages.fxaa.enabled = true;
+
+    // Ambient occlusion: darkens corners and wall bases so the blocks read as solid
+    const ao = viewer.scene.postProcessStages.ambientOcclusion;
+    const aoSupported = Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(viewer.scene);
+    if (aoSupported) {
+      ao.enabled = true;
+      ao.uniforms.intensity = 3.0;
+      ao.uniforms.bias = 0.1;
+      ao.uniforms.lengthCap = 0.03;
+      ao.uniforms.stepSize = 1.0;
+      ao.uniforms.blurStepSize = 0.86;
+    }
+
+    // Wait for the world terrain to be ready (null without a token or if it fails)
+    function terrainProvider() {
+      if (!terrain) return Promise.resolve(null);
+      if (terrain.ready) return Promise.resolve(terrain.provider);
+      return new Promise(resolve => {
+        terrain.readyEvent.addEventListener(provider => resolve(provider));
+        terrain.errorEvent.addEventListener(() => resolve(null));
+      });
+    }
 
      // ===== DOWNTOWN BUILDINGS =====
 
@@ -174,31 +207,48 @@
       console.log(features.length, "buildings", counts, "loaded", new Date().toISOString().slice(0, 10));
 
       // --- DISPLAY: the QGIS 3D View steps, standing on the terrain ---
-      const ds = await Cesium.GeoJsonDataSource.load(
-        { type: "FeatureCollection", features },
-        { clampToGround: true }
-      );
+      const ds = await Cesium.GeoJsonDataSource.load({ type: "FeatureCollection", features });
 
       // Look up each entity's cleaned attributes by OBJECTID
       const propsById = new Map(features.map(f => [f.properties.OBJECTID, f.properties]));
 
-      for (const e of ds.entities.values) {
-        if (!e.polygon) continue;
+      // Ground height under every footprint corner, sampled once from the terrain.
+      // Standing buildings at a known height (instead of clamping them to the
+      // terrain) is what lets Cesium draw their edge outlines.
+      const polys = ds.entities.values.filter(e => e.polygon);
+      const corners = polys.map(e =>
+        e.polygon.hierarchy.getValue(Cesium.JulianDate.now()).positions
+          .map(c => Cesium.Cartographic.fromCartesian(c)));
+      const provider = await terrainProvider();
+      if (provider) {
+        try { await Cesium.sampleTerrainMostDetailed(provider, corners.flat()); }
+        catch (err) { console.warn("Terrain sampling failed, using height 0", err); }
+      }
+
+      polys.forEach((e, i) => {
         const p = propsById.get(e.properties.OBJECTID.getValue());
         const heightFt = p.bldg_height;
-
-        e.polygon.outline = false;                                         // outlines aren't supported on terrain
-        e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND; // base sits on the terrain
         e.polygon.shadows = Cesium.ShadowMode.ENABLED;
+
         if (heightFt != null) {
-          e.polygon.extrudedHeight = heightFt * FT_TO_M;                   // QGIS "Extrusion", in meters
-          e.polygon.extrudedHeightReference = Cesium.HeightReference.RELATIVE_TO_GROUND;
+          const ground = corners[i].map(c => c.height || 0);
+          const lowest = Math.min(...ground);
+          const average = ground.reduce((a, b) => a + b, 0) / ground.length;
+          e.polygon.height = lowest - 0.5;                           // base tucked just below the lowest corner
+          e.polygon.extrudedHeight = average + heightFt * FT_TO_M;   // QGIS "Extrusion", in meters
+          e.polygon.outline = true;                                  // dark edges instead of a flat-looking box
+          e.polygon.outlineColor = Cesium.Color.BLACK.withAlpha(0.45);
+          e.polygon.outlineWidth = 1;
+        } else {
+          // No height (proposed): a flat footprint draped on the terrain
+          e.polygon.outline = false;
+          e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
         }
         if (QA_NOTES[p.OBJECTID]) {
           e.description = `<p><b>QA note:</b> ${QA_NOTES[p.OBJECTID]}</p>` + e.description.getValue();
         }
         buildings.push({ entity: e, props: p });
-      }
+      });
       viewer.dataSources.add(ds);
       applyStyle();
 
@@ -355,6 +405,9 @@
       viewer.shadows = e.target.checked;
       viewer.terrainShadows = e.target.checked ? Cesium.ShadowMode.RECEIVE_ONLY : Cesium.ShadowMode.DISABLED;
     });
+    el("ambientOcclusion").disabled = !aoSupported;
+    el("ambientOcclusion").checked = aoSupported;
+    el("ambientOcclusion").addEventListener("change", e => { ao.enabled = e.target.checked; });
 
     el("count").textContent = "Loading buildings…";
     loadBuildings().catch(err => {
