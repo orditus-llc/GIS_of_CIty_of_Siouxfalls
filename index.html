@@ -3,7 +3,6 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-   <div id="panel">
   <title>City of Sioux Falls</title>
 
   <!-- CesiumJS from a CDN, pinned to an exact version -->
@@ -42,8 +41,10 @@
   </style>
 </head>
 <body>
-  <div id="cesiumContainer"></div>
- <h3>Downtown Sioux Falls</h3>
+   <div id="cesiumContainer"></div>
+
+  <div id="panel">
+    <h3>Downtown Sioux Falls</h3>
     <label>Color by
       <select id="colorBy">
         <option value="stories">Number of stories</option>
@@ -110,16 +111,6 @@
       return result.features[0].geometry;
     }
 
-    // QGIS rule-based colors by NUMBERSTORIES
-    function storyColor(stories) {
-      if (stories == null)                return Cesium.Color.LIGHTGRAY;                      // Unknown (no story data)
-      if (stories >= 1 && stories <= 2)  return Cesium.Color.fromCssColorString("#c6dbef");  // 1–2 stories
-      if (stories >= 3 && stories <= 5)  return Cesium.Color.fromCssColorString("#6baed6");  // 3–5 stories
-      if (stories >= 6 && stories <= 8)  return Cesium.Color.fromCssColorString("#2171b5");  // 6–8 stories
-      if (stories >= 9 && stories <= 11) return Cesium.Color.fromCssColorString("#08306b");  // 9–11 stories
-      return Cesium.Color.LIGHTGRAY;
-    }
-
     async function loadBuildings() {
       // --- DOWNLOAD: buildings touching the downtown boundary, in lat/lon ---
       const boundary = await getBoundary();
@@ -160,6 +151,12 @@
         if (p.STATUS === "Proposed" && p.BUILDINGTOPELEVATION == null) p.height_flag = "proposed_no_height";
         else if (p.bldg_height == null) p.height_flag = "missing";
         else p.height_flag = "measured";
+
+        // Fields used by the panel's color modes and filters
+        const code = p.STRUCTURE;
+        p.use_group = code != null ? (USE_GROUP[Math.floor(code / 100)] || "other") : "other";
+        p.is_accessory = code != null && code % 100 === 90;   // 190, 290, ... 790 = accessory structures
+        p.area_sqft = p["Shape.STArea()"] ?? null;            // City area is in square feet
       }
 
       // --- REMOVE BUILDINGS: put any features.filter(...) lines here ---
@@ -174,26 +171,38 @@
         { type: "FeatureCollection", features },
         { clampToGround: true }
       );
+
+      // Look up each entity's cleaned attributes by OBJECTID
+      const propsById = new Map(features.map(f => [f.properties.OBJECTID, f.properties]));
+
       for (const e of ds.entities.values) {
         if (!e.polygon) continue;
-        const get = name => (e.properties[name] ? e.properties[name].getValue() : null);
-        const heightFt = get("bldg_height");
+        const p = propsById.get(e.properties.OBJECTID.getValue());
+        const heightFt = p.bldg_height;
 
-        e.polygon.material = storyColor(get("NUMBERSTORIES"));
         e.polygon.outline = false;                                         // outlines aren't supported on terrain
         e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND; // base sits on the terrain
+        e.polygon.shadows = Cesium.ShadowMode.ENABLED;
         if (heightFt != null) {
           e.polygon.extrudedHeight = heightFt * FT_TO_M;                   // QGIS "Extrusion", in meters
           e.polygon.extrudedHeightReference = Cesium.HeightReference.RELATIVE_TO_GROUND;
         }
+        if (QA_NOTES[p.OBJECTID]) {
+          e.description = `<p><b>QA note:</b> ${QA_NOTES[p.OBJECTID]}</p>` + e.description.getValue();
+        }
+        buildings.push({ entity: e, props: p });
       }
       viewer.dataSources.add(ds);
+      applyStyle();
 
       // Tilted camera, like QGIS "New 3D Map View"
       viewer.zoomTo(ds, new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-35), 1500));
+    }
 
-      // OWNEDBY codes -> readable labels (from your field definitions)
-    const OWNER = { "-1": "Private", "1": "City", "2": "City facility", "-2": "Other" };
+    // ===== COLOR MODES, LEGEND AND FILTERS =====
+
+    // OWNEDBY codes -> readable labels (from the layer's field definitions)
+    const OWNER = { "-1": "Private", "1": "City", "2": "City facility", "-2": "Other", "-3": "Renner Sanitary District" };
 
     // QA notes from the deep dive, keyed by OBJECTID
     const QA_NOTES = {
@@ -205,9 +214,146 @@
       250262: "2 stories but 56.8 ft (28 ft per story): check on aerial imagery",
       207414: "4 Multi-Family addresses but UNITS = 0, likely missing",
     };
+
+    // STRUCTURE code hundreds digit -> use group
+    const USE_GROUP = { 1: "res", 2: "res", 3: "office", 4: "inst", 5: "comm", 6: "ind", 7: "green", 9: "other" };
+
+    // Each mode: legend classes (in display order) and how to pick a class for a building
+    const MODES = {
+      stories: {
+        classes: [
+          { key: "1-2",   label: "1–2 stories",  color: "#c6dbef" },
+          { key: "3-5",   label: "3–5 stories",  color: "#6baed6" },
+          { key: "6-8",   label: "6–8 stories",  color: "#2171b5" },
+          { key: "9-11",  label: "9–11 stories", color: "#08306b" },
+          { key: "other", label: "Unknown",      color: "#d3d3d3" },
+        ],
+        classify: p => {
+          const s = p.NUMBERSTORIES;
+          if (s >= 1 && s <= 2) return "1-2";
+          if (s >= 3 && s <= 5) return "3-5";
+          if (s >= 6 && s <= 8) return "6-8";
+          if (s >= 9 && s <= 11) return "9-11";
+          return "other";
+        },
+      },
+      use: {
+        classes: [
+          { key: "res",    label: "Residential",           color: "#f1c40f" },
+          { key: "office", label: "Office & government",   color: "#3498db" },
+          { key: "inst",   label: "Institutional & public", color: "#9b59b6" },
+          { key: "comm",   label: "Commercial & mixed use", color: "#e74c3c" },
+          { key: "ind",    label: "Industrial",            color: "#7f8c8d" },
+          { key: "green",  label: "Green space",           color: "#27ae60" },
+          { key: "other",  label: "Other / unknown",       color: "#d3d3d3" },
+        ],
+        classify: p => p.use_group,
+      },
+      owner: {
+        classes: [
+          { key: "-1",    label: "Private",       color: "#95a5a6" },
+          { key: "1",     label: "City",          color: "#2980b9" },
+          { key: "2",     label: "City facility", color: "#1abc9c" },
+          { key: "-2",    label: "Other",         color: "#e67e22" },
+          { key: "-3",    label: "Renner Sanitary District", color: "#8e44ad" },
+          { key: "other", label: "Unknown",       color: "#d3d3d3" },
+        ],
+        classify: p => (OWNER[String(p.OWNEDBY)] ? String(p.OWNEDBY) : "other"),
+      },
+      qa: {
+        classes: [
+          { key: "measured",           label: "Measured height",      color: "#2ecc71" },
+          { key: "note",               label: "QA note (click building)", color: "#e74c3c" },
+          { key: "proposed_no_height", label: "Proposed, no height",  color: "#f39c12" },
+          { key: "missing",            label: "Missing height",       color: "#8e44ad" },
+        ],
+        classify: p => (QA_NOTES[p.OBJECTID] ? "note" : p.height_flag),
+      },
+    };
+    for (const mode of Object.values(MODES)) {
+      for (const c of mode.classes) c.cesiumColor = Cesium.Color.fromCssColorString(c.color);
     }
 
-    loadBuildings().catch(err => console.error(err));
+    const buildings = [];  // { entity, props } for every footprint
+    const hidden = {};     // per mode: Set of legend keys the user switched off
+    for (const name in MODES) hidden[name] = new Set();
+
+    const el = id => document.getElementById(id);
+
+    // Recolor, filter and redraw the legend from the current panel settings
+    function applyStyle() {
+      const modeName = el("colorBy").value;
+      const mode = MODES[modeName];
+      const off = hidden[modeName];
+      const minHeight = Number(el("minHeight").value);
+      const showAccessory = el("showAccessory").checked;
+      const showProposed = el("showProposed").checked;
+      const showSmall = el("showSmall").checked;
+      el("minHeightLabel").textContent = minHeight;
+
+      const counts = {};
+      let shown = 0;
+      for (const { entity, props: p } of buildings) {
+        let key = mode.classify(p);
+        if (!mode.classes.some(c => c.key === key)) key = "other";
+        const cls = mode.classes.find(c => c.key === key);
+        entity.polygon.material = cls.cesiumColor;
+
+        const passesFilters =
+          (showAccessory || !p.is_accessory) &&
+          (showProposed || p.height_flag !== "proposed_no_height") &&
+          (showSmall || p.area_sqft == null || p.area_sqft >= 150) &&
+          (minHeight === 0 || (p.bldg_height != null && p.bldg_height >= minHeight));
+
+        if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
+        entity.show = passesFilters && !off.has(key);
+        if (entity.show) shown++;
+      }
+
+      renderLegend(mode, off, counts);
+      el("count").textContent = `${shown} of ${buildings.length} buildings shown`;
+    }
+
+    function renderLegend(mode, off, counts) {
+      const legend = el("legend");
+      legend.innerHTML = '<div class="hint">Click a class to show/hide it</div>';
+      for (const c of mode.classes) {
+        if (!counts[c.key] && !off.has(c.key)) continue;  // skip empty classes
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "legend-row" + (off.has(c.key) ? " off" : "");
+        row.innerHTML = `<span style="background:${c.color}"></span>${c.label} <em>(${counts[c.key] || 0})</em>`;
+        row.addEventListener("click", () => {
+          off.has(c.key) ? off.delete(c.key) : off.add(c.key);
+          applyStyle();
+        });
+        legend.appendChild(row);
+      }
+      if (off.size) {
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "legend-reset";
+        reset.textContent = "Show all";
+        reset.addEventListener("click", () => { off.clear(); applyStyle(); });
+        legend.appendChild(reset);
+      }
+    }
+
+    // Wire up the panel controls
+    for (const id of ["colorBy", "showAccessory", "showProposed", "showSmall"]) {
+      el(id).addEventListener("change", applyStyle);
+    }
+    el("minHeight").addEventListener("input", applyStyle);
+    el("shadows").addEventListener("change", e => {
+      viewer.shadows = e.target.checked;
+      viewer.terrainShadows = e.target.checked ? Cesium.ShadowMode.RECEIVE_ONLY : Cesium.ShadowMode.DISABLED;
+    });
+
+    el("count").textContent = "Loading buildings…";
+    loadBuildings().catch(err => {
+      console.error(err);
+      el("count").textContent = "Could not load buildings: " + err.message;
+    });
   </script>
 </body>
 </html>
