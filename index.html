@@ -55,8 +55,8 @@
     </label>
     <fieldset>
       <legend>Show</legend>
-      <label><input type="checkbox" id="showAccessory" checked> Accessory structures</label>
-      <label><input type="checkbox" id="showProposed" checked> Proposed (no height)</label>
+      <label><input type="checkbox" id="showAccessory" checked> Detached structures: garages, storage, park shelters…</label>
+      <label><input type="checkbox" id="showProposed" checked> Proposed</label>
       <label><input type="checkbox" id="showSmall" checked> Footprints under 150 sq ft</label>
       <label id="showTreesRow"><input type="checkbox" id="showTrees" checked> Trees <em id="treeCount" style="color:#aaa;font-style:normal"></em></label>
     </fieldset>
@@ -530,7 +530,12 @@
     for (const id of ["colorBy", "showAccessory", "showProposed", "showSmall"]) {
       el(id).addEventListener("change", applyStyle);
     }
-    el("minHeight").addEventListener("input", applyStyle);
+    // Moving the height slider brings back any legend classes that were clicked off,
+    // so the slider alone decides which buildings show (the Show checkboxes still apply).
+    el("minHeight").addEventListener("input", () => {
+      for (const name in hidden) hidden[name].clear();
+      applyStyle();
+    });
     el("shadows").addEventListener("change", e => {
       viewer.shadows = e.target.checked;
       viewer.terrainShadows = e.target.checked ? Cesium.ShadowMode.RECEIVE_ONLY : Cesium.ShadowMode.DISABLED;
