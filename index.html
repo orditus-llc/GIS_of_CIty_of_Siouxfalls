@@ -236,6 +236,9 @@
       // Look up each entity's cleaned attributes by OBJECTID
       const propsById = new Map(features.map(f => [f.properties.OBJECTID, f.properties]));
 
+      // The City's names for the STRUCTURE codes (e.g. 530 -> "Mixed Use - Downtown/Village")
+      const structureNames = await getStructureNames();
+
       // Ground height under every footprint corner, sampled once from the terrain.
       // Standing buildings at a known height (instead of clamping them to the
       // terrain) is what lets Cesium draw their edge outlines.
@@ -268,9 +271,9 @@
           e.polygon.outline = false;
           e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
         }
-        if (QA_NOTES[p.OBJECTID]) {
-          e.description = `<p><b>QA note:</b> ${QA_NOTES[p.OBJECTID]}</p>` + e.description.getValue();
-        }
+        // Click popup: building type as the title, plain-language rows below
+        e.name = buildingType(p.STRUCTURE, structureNames);
+        e.description = popupHtml(p);
         buildings.push({ entity: e, props: p });
       });
       viewer.dataSources.add(ds);
@@ -385,6 +388,48 @@
 
     // OWNEDBY codes -> readable labels (from the layer's field definitions)
     const OWNER = { "-1": "Private", "1": "City", "2": "City facility", "-2": "Other", "-3": "Renner Sanitary District" };
+
+    // ===== CLICK POPUP =====
+
+    // Download the City's list of STRUCTURE code names once (a plain "Building" title if it fails)
+    async function getStructureNames() {
+      try {
+        const info = await (await fetch(LAYER_URL + "?f=json")).json();
+        const field = info.fields.find(f => f.name === "STRUCTURE");
+        return new Map(field.domain.codedValues.map(c => [c.code, c.name]));
+      } catch (err) {
+        console.warn("Could not load structure names", err);
+        return new Map();
+      }
+    }
+
+    // "530 Mixed Use - Downtown/Village" -> "Mixed Use – Downtown/Village"
+    function buildingType(code, names) {
+      const name = names.get(code);
+      return name ? name.replace(/^\d+\s*/, "").replace(" - ", " – ") : "Building";
+    }
+
+    // The rows a visitor sees when clicking a building. Empty values are skipped.
+    function popupHtml(p) {
+      const fmt = n => Math.round(n).toLocaleString("en-US");
+      const useClass = MODES.use.classes.find(c => c.key === p.use_group);
+      const rows = [
+        ["Use",                   useClass && useClass.label],
+        ["Height",                p.bldg_height != null ? `${fmt(p.bldg_height)} ft` : null],
+        ["Stories",               p.NUMBERSTORIES || null],
+        ["Housing units",         p.UNITS > 0 ? fmt(p.UNITS) : null],
+        ["Footprint",             p.area_sqft != null ? `${fmt(p.area_sqft)} sq ft` : null],
+        ["Year occupied",         p.OCCUPIEDDATE ? String(p.OCCUPIEDDATE).slice(0, 4) : null],
+        ["Owner",                 OWNER[String(p.OWNEDBY)]],
+        ["Status",                p.STATUS === "Proposed" ? "Proposed: not constructed yet" : p.STATUS],
+        ["Indoor parking spaces", p.InternalParkingSpaces > 0 ? fmt(p.InternalParkingSpaces) : null],
+        ["Data note",             QA_NOTES[p.OBJECTID]],
+      ].filter(([, v]) => v != null && v !== "");
+      return `<table class="cesium-infoBox-defaultTable"><tbody>` +
+        rows.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
+        `</tbody></table>` +
+        `<p style="font-size:11px;color:#aaa;margin:8px 4px">City building ID ${p.OBJECTID} · Source: City of Sioux Falls</p>`;
+    }
 
     // QA notes from the deep dive, keyed by OBJECTID
     const QA_NOTES = {
