@@ -22,7 +22,7 @@
     #panel label { display: block; margin: 4px 0; }
     #panel select, #panel input[type=range] { width: 100%; }
     #panel fieldset { border: 1px solid #666; border-radius: 4px; margin: 8px 0; padding: 4px 8px; }
-    #legend span { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: middle; }
+    #legend span { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: middle; box-sizing: border-box; border: 1px solid #888; }
     #count { margin-top: 8px; color: #ccc; }
 
     #legend .hint { color: #aaa; font-size: 11px; margin: 8px 0 4px; }
@@ -58,6 +58,7 @@
       <label><input type="checkbox" id="showAccessory" checked> Accessory structures</label>
       <label><input type="checkbox" id="showProposed" checked> Proposed (no height)</label>
       <label><input type="checkbox" id="showSmall" checked> Footprints under 150 sq ft</label>
+      <label id="showTreesRow"><input type="checkbox" id="showTrees" checked> Trees <em id="treeCount" style="color:#aaa;font-style:normal"></em></label>
     </fieldset>
     <label>Minimum height: <span id="minHeightLabel">0</span> ft
       <input type="range" id="minHeight" min="0" max="170" step="5" value="0">
@@ -95,6 +96,18 @@
       ),
       baseLayerPicker: false,
     });
+
+    // ===== STARTING VIEW =====
+    // Where the camera starts: looking at downtown Sioux Falls, tilted like
+    // QGIS "New 3D Map View". Raise START_DISTANCE_M to start further out,
+    // lower it to start closer in.
+    const START_CENTER = { lon: -96.7270, lat: 43.5470, height: 450 };  // downtown; ground is ~450 m above sea level
+    const START_DISTANCE_M = 3500;   // camera distance from the center, in meters
+    const START_PITCH_DEG  = -40;    // tilt: -90 = straight down, 0 = horizon
+    viewer.camera.flyToBoundingSphere(
+      new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(START_CENTER.lon, START_CENTER.lat, START_CENTER.height), 0),
+      { offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(START_PITCH_DEG), START_DISTANCE_M), duration: 0 }
+    );
 
     // ===== LOOK: sun lighting, soft corner shading, smooth edges =====
     // A fixed late-afternoon sun so each wall gets its own shade (use the
@@ -142,32 +155,48 @@
       return resp.json();
     }
 
-    // Get the one Downtown Business District shape, in lat/lon
-    async function getBoundary() {
-      const result = await query(BOUNDARY_URL, { where: "1=1", outFields: "OBJECTID", outSR: 4326, f: "json" });
-      if (result.error) throw new Error("Boundary: " + result.error.message);
-      const n = result.features ? result.features.length : 0;
-      if (n !== 1) throw new Error(`Expected 1 boundary shape, got ${n}`);
-      return result.features[0].geometry;
+    // Get the one Downtown Business District shape, in lat/lon (downloaded once, shared by all layers)
+    let boundaryPromise = null;
+    function getBoundary() {
+      boundaryPromise ??= (async () => {
+        const result = await query(BOUNDARY_URL, { where: "1=1", outFields: "OBJECTID", outSR: 4326, f: "json" });
+        if (result.error) throw new Error("Boundary: " + result.error.message);
+        const n = result.features ? result.features.length : 0;
+        if (n !== 1) throw new Error(`Expected 1 boundary shape, got ${n}`);
+        return result.features[0].geometry;
+      })();
+      return boundaryPromise;
+    }
+
+    // Download every feature of a City layer that touches the downtown boundary, as GeoJSON.
+    // Paging by offset is unreliable on this server (pages come back short and overlap,
+    // e.g. 1,628 trees for 1,586 real ones), so first ask for the matching IDs, then
+    // download the features by ID in chunks.
+    async function queryDowntown(layerUrl, label, { where = "1=1", outFields = "*" } = {}) {
+      const boundary = await getBoundary();
+      const idResult = await query(layerUrl, {
+        where, returnIdsOnly: true, f: "json",
+        geometry: JSON.stringify(boundary), geometryType: "esriGeometryPolygon",
+        inSR: 4326, spatialRel: "esriSpatialRelIntersects",
+      });
+      if (idResult.error) throw new Error(label + ": " + idResult.error.message);
+      const ids = (idResult.objectIds || []).sort((a, b) => a - b);
+
+      const features = [];
+      for (let i = 0; i < ids.length; i += PAGE_SIZE / 2) {
+        const page = await query(layerUrl, {
+          objectIds: ids.slice(i, i + PAGE_SIZE / 2).join(","),
+          outFields, outSR: 4326, f: "geojson",
+        });
+        if (page.error) throw new Error(label + ": " + page.error.message);
+        features.push(...(page.features || []));
+      }
+      return features;
     }
 
     async function loadBuildings() {
       // --- DOWNLOAD: buildings touching the downtown boundary, in lat/lon ---
-      const boundary = await getBoundary();
-      let features = [];
-      while (true) {
-        const page = await query(LAYER_URL, {
-          where: "1=1", outFields: "*", orderByFields: "OBJECTID",
-          resultOffset: features.length, resultRecordCount: PAGE_SIZE,
-          outSR: 4326, f: "geojson",
-          geometry: JSON.stringify(boundary), geometryType: "esriGeometryPolygon",
-          inSR: 4326, spatialRel: "esriSpatialRelIntersects"
-        });
-        if (page.error) throw new Error("Buildings: " + page.error.message);
-        const batch = page.features || [];
-        features.push(...batch);
-        if (batch.length < PAGE_SIZE) break;
-      }
+      const features = await queryDowntown(LAYER_URL, "Buildings");
 
       // --- CLEAN: the QGIS Field Calculator steps (add new cleaning steps in this loop) ---
       for (const f of features) {
@@ -251,9 +280,110 @@
       });
       viewer.dataSources.add(ds);
       applyStyle();
+      // No camera move here: the camera already starts over downtown (see STARTING VIEW),
+      // so it doesn't jump in on the user once the buildings finish loading.
+    }
 
-      // Tilted camera, like QGIS "New 3D Map View"
-      viewer.zoomTo(ds, new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-35), 1500));
+    // ===== TREES =====
+
+    // City tree inventory. Only living trees: the layer also holds planting sites,
+    // removal sites and stumps. Height and Spread are in feet, Diameter (trunk) in inches.
+    const TREES_URL = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Trees/MapServer/10";
+    const TREE_FIELDS = "OBJECTID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,InstallYear,Address,LocationName";
+    const treeSource = new Cesium.CustomDataSource("Trees");
+    viewer.dataSources.add(treeSource);
+
+    const TRUNK_COLOR   = Cesium.Color.fromCssColorString("#6b4f35");
+    const LEAF_COLORS   = ["#4e8a3a", "#5b9442", "#467f35", "#62994a"].map(c => Cesium.Color.fromCssColorString(c));
+    const CONIFER_COLOR = Cesium.Color.fromCssColorString("#2f5d3a");
+
+    const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    // Fill in missing sizes so every tree gets a believable shape (feet)
+    function treeSize(p) {
+      const conifer = p.TreeType === "Coniferous";
+      let height = p.Height > 0 ? p.Height
+                 : p.Diameter > 0 ? Math.min(Math.max(p.Diameter * 2.2, 8), 60)  // rough height from trunk size
+                 : 25;                                                           // downtown median
+      let spread = p.Spread > 0 ? p.Spread : height * (conifer ? 0.4 : 0.65);
+      spread = Math.min(Math.max(spread, 3), height * 1.3);
+      const trunkRadiusM = p.Diameter > 0 ? (p.Diameter * 0.0254) / 2 : height * FT_TO_M * 0.015;
+      return { conifer, h: height * FT_TO_M, r: (spread / 2) * FT_TO_M, trunkR: Math.max(trunkRadiusM, 0.08) };
+    }
+
+    async function loadTrees() {
+      const features = await queryDowntown(TREES_URL, "Trees", {
+        where: "SiteType IN ('Tree','Memorial Tree','Treated')",
+        outFields: TREE_FIELDS,
+      });
+
+      // Ground height under each tree (0 without terrain)
+      const spots = features.map(f => Cesium.Cartographic.fromDegrees(...f.geometry.coordinates));
+      const provider = await terrainProvider();
+      if (provider) {
+        try { await Cesium.sampleTerrainMostDetailed(provider, spots); }
+        catch (err) { console.warn("Tree terrain sampling failed, using height 0", err); }
+      }
+
+      const lift = (spot, metersUp) =>
+        Cesium.Cartesian3.fromRadians(spot.longitude, spot.latitude, (spot.height || 0) + metersUp);
+
+      features.forEach((f, i) => {
+        const p = f.properties;
+        const { conifer, h, r, trunkR } = treeSize(p);
+        const spot = spots[i];
+        const name = p.FullName || "Tree";
+        const description =
+          `<table class="cesium-infoBox-defaultTable"><tbody>` +
+          [["Species", p.FullName], ["Height", p.Height ? p.Height + " ft" : "not recorded"],
+           ["Crown spread", p.Spread ? p.Spread + " ft" : "not recorded"],
+           ["Trunk diameter", p.Diameter ? p.Diameter + " in" : "not recorded"],
+           ["Condition", p.ConditionAssesment], ["Planted", p.InstallYear],
+           ["Location", p.LocationName], ["Address", p.Address], ["Site type", p.SiteType]]
+            .filter(([, v]) => v != null && v !== "")
+            .map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
+          `</tbody></table>`;
+
+        // Trunk: a thin cylinder up into the crown
+        const trunkH = h * (conifer ? 0.3 : 0.5);
+        treeSource.entities.add({
+          name, description,
+          position: lift(spot, trunkH / 2),
+          cylinder: {
+            length: trunkH, topRadius: trunkR, bottomRadius: trunkR, slices: 8,
+            material: TRUNK_COLOR, shadows: Cesium.ShadowMode.ENABLED,
+          },
+        });
+
+        if (conifer) {
+          // Evergreen: a cone from 15% of the height to the top
+          const coneH = h * 0.85;
+          treeSource.entities.add({
+            name, description,
+            position: lift(spot, h - coneH / 2),
+            cylinder: {
+              length: coneH, topRadius: 0, bottomRadius: r, slices: 12,
+              material: CONIFER_COLOR, shadows: Cesium.ShadowMode.ENABLED,
+            },
+          });
+        } else {
+          // Broadleaf: a rounded crown over the top 60% of the height
+          const crownHalf = h * 0.3;
+          treeSource.entities.add({
+            name, description,
+            position: lift(spot, h - crownHalf),
+            ellipsoid: {
+              radii: new Cesium.Cartesian3(r, r, crownHalf),
+              stackPartitions: 10, slicePartitions: 12,
+              material: LEAF_COLORS[p.OBJECTID % LEAF_COLORS.length],
+              shadows: Cesium.ShadowMode.ENABLED,
+            },
+          });
+        }
+      });
+
+      el("treeCount").textContent = `(${features.length})`;
+      console.log(features.length, "trees loaded");
     }
 
     // ===== COLOR MODES, LEGEND AND FILTERS =====
@@ -283,7 +413,7 @@
           { key: "3-5",   label: "3–5 stories",  color: "#6baed6" },
           { key: "6-8",   label: "6–8 stories",  color: "#2171b5" },
           { key: "9-11",  label: "9–11 stories", color: "#08306b" },
-          { key: "other", label: "Unknown",      color: "#d3d3d3" },
+          { key: "other", label: "Unknown",      color: "#000000" },
         ],
         classify: p => {
           const s = p.NUMBERSTORIES;
@@ -302,7 +432,7 @@
           { key: "comm",   label: "Commercial & mixed use", color: "#e74c3c" },
           { key: "ind",    label: "Industrial",            color: "#7f8c8d" },
           { key: "green",  label: "Green space",           color: "#27ae60" },
-          { key: "other",  label: "Other / unknown",       color: "#d3d3d3" },
+          { key: "other",  label: "Other / unknown",       color: "#000000" },
         ],
         classify: p => p.use_group,
       },
@@ -313,7 +443,7 @@
           { key: "2",     label: "City facility", color: "#1abc9c" },
           { key: "-2",    label: "Other",         color: "#e67e22" },
           { key: "-3",    label: "Renner Sanitary District", color: "#8e44ad" },
-          { key: "other", label: "Unknown",       color: "#d3d3d3" },
+          { key: "other", label: "Unknown",       color: "#000000" },
         ],
         classify: p => (OWNER[String(p.OWNEDBY)] ? String(p.OWNEDBY) : "other"),
       },
@@ -408,12 +538,24 @@
     el("ambientOcclusion").disabled = !aoSupported;
     el("ambientOcclusion").checked = aoSupported;
     el("ambientOcclusion").addEventListener("change", e => { ao.enabled = e.target.checked; });
+    el("showTrees").addEventListener("change", e => { treeSource.show = e.target.checked; });
 
     el("count").textContent = "Loading buildings…";
     loadBuildings().catch(err => {
       console.error(err);
       el("count").textContent = "Could not load buildings: " + err.message;
     });
+    // Trees are switched off until the tree data is cleaned in QGIS.
+    // Set SHOW_TREES to true to put them back on the map.
+    const SHOW_TREES = false;
+    if (SHOW_TREES) {
+      loadTrees().catch(err => {
+        console.error(err);
+        el("treeCount").textContent = "(failed to load)";
+      });
+    } else {
+      el("showTreesRow").style.display = "none";
+    }
   </script>
 </body>
 </html>
