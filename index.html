@@ -63,7 +63,6 @@
       <input type="range" id="minHeight" min="0" max="170" step="5" value="0">
     </label>
     <label><input type="checkbox" id="shadows"> Sun shadows</label>
-    <label><input type="checkbox" id="ambientOcclusion" checked> Soft corner shading</label>
     <div id="legend"></div>
     <div id="count"></div>
   </div>
@@ -103,12 +102,21 @@
     const START_CENTER = { lon: -96.7270, lat: 43.5470, height: 450 };  // downtown; ground is ~450 m above sea level
     const START_DISTANCE_M = 3500;   // camera distance from the center, in meters
     const START_PITCH_DEG  = -40;    // tilt: -90 = straight down, 0 = horizon
-    viewer.camera.flyToBoundingSphere(
-      new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(START_CENTER.lon, START_CENTER.lat, START_CENTER.height), 0),
-      { offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(START_PITCH_DEG), START_DISTANCE_M), duration: 0 }
-    );
+    function goToStart(duration) {
+      viewer.camera.flyToBoundingSphere(
+        new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(START_CENTER.lon, START_CENTER.lat, START_CENTER.height), 0),
+        { offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(START_PITCH_DEG), START_DISTANCE_M), duration }
+      );
+    }
+    goToStart(0);  // jump straight there when the page opens
 
-    // ===== LOOK: sun lighting, soft corner shading, smooth edges =====
+    // The Home button (top right) flies back to this starting view instead of the whole globe
+    viewer.homeButton.viewModel.command.beforeExecute.addEventListener(e => {
+      e.cancel = true;   // skip Cesium's default "zoom out to the world"
+      goToStart(1.5);    // smooth 1.5-second flight
+    });
+
+    // ===== LOOK: sun lighting, smooth edges =====
     // A fixed late-afternoon sun so each wall gets its own shade (use the
     // timeline at the bottom to move the sun; turn on "Sun shadows" to cast them).
     viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-09-15T21:00:00Z");  // 4 pm CDT
@@ -116,18 +124,6 @@
 
     // Anti-aliasing: smooths jagged building edges
     viewer.scene.postProcessStages.fxaa.enabled = true;
-
-    // Ambient occlusion: darkens corners and wall bases so the blocks read as solid
-    const ao = viewer.scene.postProcessStages.ambientOcclusion;
-    const aoSupported = Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(viewer.scene);
-    if (aoSupported) {
-      ao.enabled = true;
-      ao.uniforms.intensity = 3.0;
-      ao.uniforms.bias = 0.1;
-      ao.uniforms.lengthCap = 0.03;
-      ao.uniforms.stepSize = 1.0;
-      ao.uniforms.blurStepSize = 0.86;
-    }
 
     // Wait for the world terrain to be ready (null without a token or if it fails)
     function terrainProvider() {
@@ -469,7 +465,7 @@
     // "Show" filters: building groups that can be clicked off, like the legend classes
     const SHOW_FILTERS = [
       { key: "accessory", label: "Detached structures: garages, storage, park shelters…", match: p => p.is_accessory },
-      { key: "proposed",  label: "Proposed",                   match: p => p.height_flag === "proposed_no_height" },
+      { key: "proposed",  label: "Proposed: not constructed yet", match: p => p.height_flag === "proposed_no_height" },
       { key: "small",     label: "Footprints under 150 sq ft", match: p => p.area_sqft != null && p.area_sqft < 150 },
     ];
     const filtersOff = new Set();  // keys of SHOW_FILTERS the user switched off
@@ -570,9 +566,6 @@
       viewer.shadows = e.target.checked;
       viewer.terrainShadows = e.target.checked ? Cesium.ShadowMode.RECEIVE_ONLY : Cesium.ShadowMode.DISABLED;
     });
-    el("ambientOcclusion").disabled = !aoSupported;
-    el("ambientOcclusion").checked = aoSupported;
-    el("ambientOcclusion").addEventListener("change", e => { ao.enabled = e.target.checked; });
     el("showTrees").addEventListener("change", e => { treeSource.show = e.target.checked; });
 
     el("count").textContent = "Loading buildings…";
