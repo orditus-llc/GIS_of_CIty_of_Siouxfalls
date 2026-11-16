@@ -25,6 +25,7 @@
     #legend span { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: middle; box-sizing: border-box; border: 1px solid #888; }
     #count { margin-top: 8px; color: #ccc; }
 
+    #showFilters .hint { color: #aaa; font-size: 11px; margin: 2px 0 4px; }
     #legend .hint { color: #aaa; font-size: 11px; margin: 8px 0 4px; }
     .legend-row {
       display: block; width: 100%; text-align: left; cursor: pointer;
@@ -55,9 +56,7 @@
     </label>
     <fieldset>
       <legend>Show</legend>
-      <label><input type="checkbox" id="showAccessory" checked> Detached structures: garages, storage, park shelters…</label>
-      <label><input type="checkbox" id="showProposed" checked> Proposed</label>
-      <label><input type="checkbox" id="showSmall" checked> Footprints under 150 sq ft</label>
+      <div id="showFilters"></div>
       <label id="showTreesRow"><input type="checkbox" id="showTrees" checked> Trees <em id="treeCount" style="color:#aaa;font-style:normal"></em></label>
     </fieldset>
     <label>Minimum height: <span id="minHeightLabel">0</span> ft
@@ -467,18 +466,24 @@
 
     const el = id => document.getElementById(id);
 
+    // "Show" filters: building groups that can be clicked off, like the legend classes
+    const SHOW_FILTERS = [
+      { key: "accessory", label: "Detached structures: garages, storage, park shelters…", match: p => p.is_accessory },
+      { key: "proposed",  label: "Proposed",                   match: p => p.height_flag === "proposed_no_height" },
+      { key: "small",     label: "Footprints under 150 sq ft", match: p => p.area_sqft != null && p.area_sqft < 150 },
+    ];
+    const filtersOff = new Set();  // keys of SHOW_FILTERS the user switched off
+
     // Recolor, filter and redraw the legend from the current panel settings
     function applyStyle() {
       const modeName = el("colorBy").value;
       const mode = MODES[modeName];
       const off = hidden[modeName];
       const minHeight = Number(el("minHeight").value);
-      const showAccessory = el("showAccessory").checked;
-      const showProposed = el("showProposed").checked;
-      const showSmall = el("showSmall").checked;
       el("minHeightLabel").textContent = minHeight;
 
       const counts = {};
+      const filterCounts = {};
       let shown = 0;
       for (const { entity, props: p } of buildings) {
         let key = mode.classify(p);
@@ -486,10 +491,11 @@
         const cls = mode.classes.find(c => c.key === key);
         entity.polygon.material = cls.cesiumColor;
 
+        const groups = SHOW_FILTERS.filter(f => f.match(p));
+        for (const f of groups) filterCounts[f.key] = (filterCounts[f.key] || 0) + 1;
+
         const passesFilters =
-          (showAccessory || !p.is_accessory) &&
-          (showProposed || p.height_flag !== "proposed_no_height") &&
-          (showSmall || p.area_sqft == null || p.area_sqft >= 150) &&
+          !groups.some(f => filtersOff.has(f.key)) &&
           (minHeight === 0 || (p.bldg_height != null && p.bldg_height >= minHeight));
 
         if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
@@ -497,8 +503,34 @@
         if (entity.show) shown++;
       }
 
+      renderShowFilters(filterCounts);
       renderLegend(mode, off, counts);
       el("count").textContent = `${shown} of ${buildings.length} buildings shown`;
+    }
+
+    // Same look and behavior as the legend: click a row to hide/show that group
+    function renderShowFilters(filterCounts) {
+      const box = el("showFilters");
+      box.innerHTML = '<div class="hint">Click a group to show/hide it</div>';
+      for (const f of SHOW_FILTERS) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "legend-row" + (filtersOff.has(f.key) ? " off" : "");
+        row.innerHTML = `${f.label} <em>(${filterCounts[f.key] || 0})</em>`;
+        row.addEventListener("click", () => {
+          filtersOff.has(f.key) ? filtersOff.delete(f.key) : filtersOff.add(f.key);
+          applyStyle();
+        });
+        box.appendChild(row);
+      }
+      if (filtersOff.size) {
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "legend-reset";
+        reset.textContent = "Show all";
+        reset.addEventListener("click", () => { filtersOff.clear(); applyStyle(); });
+        box.appendChild(reset);
+      }
     }
 
     function renderLegend(mode, off, counts) {
@@ -527,9 +559,7 @@
     }
 
     // Wire up the panel controls
-    for (const id of ["colorBy", "showAccessory", "showProposed", "showSmall"]) {
-      el(id).addEventListener("change", applyStyle);
-    }
+    el("colorBy").addEventListener("change", applyStyle);
     // Moving the height slider brings back any legend classes that were clicked off,
     // so the slider alone decides which buildings show (the Show checkboxes still apply).
     el("minHeight").addEventListener("input", () => {
