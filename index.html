@@ -34,6 +34,8 @@
     }
     .legend-row:hover { background: rgba(255, 255, 255, 0.12); }
     .legend-row.off { opacity: 0.4; text-decoration: line-through; }
+    .legend-row.selected { background: rgba(255, 255, 255, 0.2); font-weight: bold; }
+    .legend-row.dim { opacity: 0.5; }
     .legend-row em { color: #aaa; font-style: normal; }
     .legend-reset {
       margin-top: 4px; cursor: pointer; background: #555; color: #fff;
@@ -513,7 +515,7 @@
       { key: "proposed",  label: "Proposed: not constructed yet", match: p => p.height_flag === "proposed_no_height" },
       { key: "small",     label: "Footprints under 150 sq ft", match: p => p.area_sqft != null && p.area_sqft < 150 },
     ];
-    const filtersOff = new Set();  // keys of SHOW_FILTERS the user switched off
+    const filtersOn = new Set();  // keys of SHOW_FILTERS picked; when any are picked, only those buildings show
 
     // Recolor, filter and redraw the legend from the current panel settings
     function applyStyle() {
@@ -536,7 +538,7 @@
         for (const f of groups) filterCounts[f.key] = (filterCounts[f.key] || 0) + 1;
 
         const passesFilters =
-          !groups.some(f => filtersOff.has(f.key)) &&
+          (filtersOn.size === 0 || groups.some(f => filtersOn.has(f.key))) &&
           (minHeight === 0 || (p.bldg_height != null && p.bldg_height >= minHeight));
 
         if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
@@ -552,24 +554,24 @@
     // Same look and behavior as the legend: click a row to hide/show that group
     function renderShowFilters(filterCounts) {
       const box = el("showFilters");
-      box.innerHTML = '<div class="hint">Click a group to show/hide it</div>';
+      box.innerHTML = '<div class="hint">Click a group to show only those buildings</div>';
       for (const f of SHOW_FILTERS) {
         const row = document.createElement("button");
         row.type = "button";
-        row.className = "legend-row" + (filtersOff.has(f.key) ? " off" : "");
+        row.className = "legend-row" + (filtersOn.has(f.key) ? " selected" : filtersOn.size ? " dim" : "");
         row.innerHTML = `${f.label} <em>(${filterCounts[f.key] || 0})</em>`;
         row.addEventListener("click", () => {
-          filtersOff.has(f.key) ? filtersOff.delete(f.key) : filtersOff.add(f.key);
+          filtersOn.has(f.key) ? filtersOn.delete(f.key) : filtersOn.add(f.key);
           applyStyle();
         });
         box.appendChild(row);
       }
-      if (filtersOff.size) {
+      if (filtersOn.size) {
         const reset = document.createElement("button");
         reset.type = "button";
         reset.className = "legend-reset";
         reset.textContent = "Show all";
-        reset.addEventListener("click", () => { filtersOff.clear(); applyStyle(); });
+        reset.addEventListener("click", () => { filtersOn.clear(); applyStyle(); });
         box.appendChild(reset);
       }
     }
