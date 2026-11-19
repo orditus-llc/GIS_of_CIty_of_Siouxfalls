@@ -59,7 +59,6 @@
     <fieldset>
       <legend>Show</legend>
       <div id="showFilters"></div>
-      <label id="showTreesRow"><input type="checkbox" id="showTrees" checked> Trees <em id="treeCount" style="color:#aaa;font-style:normal"></em></label>
     </fieldset>
     <label>Minimum height: <span id="minHeightLabel">0</span> ft
       <input type="range" id="minHeight" min="0" max="170" step="5" value="0">
@@ -289,7 +288,17 @@
     // City tree inventory. Only living trees: the layer also holds planting sites,
     // removal sites and stumps. Height and Spread are in feet, Diameter (trunk) in inches.
     const TREES_URL = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Trees/MapServer/10";
-    const TREE_FIELDS = "OBJECTID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,InstallYear,Address,LocationName";
+    // Fields the data library marks "add as comments": shown behind the popup's "More info" button
+    const TREE_COMMENTS = [
+      ["SpecialComments", "Special comments"], ["Comments", "Comments"], ["Special", "Special tree"],
+      ["Source", "Source"], ["Project", "Project"],
+      ["TreatmentApplied", "Treatment applied"], ["TreatmentYear", "Treatment year"],
+      ["RemovalYear", "Removal year"], ["RemovalLot", "Removal lot"], ["PaintedDate", "Marked (painted)"],
+      ["Contractor", "Contractor"], ["ContractorCutNotes", "Contractor notes"],
+      ["PhotoURL", "Photo"], ["Risk", "Risk"],   // Risk last: "comment at the bottom"
+    ];
+    const TREE_FIELDS = "OBJECTID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,LocationName,"
+                      + TREE_COMMENTS.map(([f]) => f).join(",");
     const treeSource = new Cesium.CustomDataSource("Trees");
     viewer.dataSources.add(treeSource);
 
@@ -309,6 +318,29 @@
       spread = Math.min(Math.max(spread, 3), height * 1.3);
       const trunkRadiusM = p.Diameter > 0 ? (p.Diameter * 0.0254) / 2 : height * FT_TO_M * 0.015;
       return { conifer, h: height * FT_TO_M, r: (spread / 2) * FT_TO_M, trunkR: Math.max(trunkRadiusM, 0.08) };
+    }
+
+    // "More info" button: the comment fields that have a value, in a collapsible section.
+    // Uses <details> because the popup panel doesn't run scripts.
+    function treeCommentsHtml(p) {
+      const show = v => {
+        if (typeof v === "number" && v > 1e11) return new Date(v).toISOString().slice(0, 10);  // date (ms)
+        return v;
+      };
+      const rows = TREE_COMMENTS
+        .filter(([f]) => p[f] != null && String(p[f]).trim() !== "")
+        .map(([f, label]) => {
+          const v = f === "PhotoURL"
+            ? `<a href="${esc(p[f])}" target="_blank" rel="noopener">View photo</a>`
+            : esc(show(p[f]));
+          return `<tr><th>${label}</th><td>${v}</td></tr>`;
+        });
+      if (!rows.length) return "";
+      return `<details style="margin-top:8px">` +
+        `<summary style="cursor:pointer;display:inline-block;padding:4px 10px;border-radius:4px;` +
+        `background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3)">ℹ More info</summary>` +
+        `<table class="cesium-infoBox-defaultTable" style="margin-top:6px"><tbody>${rows.join("")}</tbody></table>` +
+        `</details>`;
     }
 
     async function loadTrees() {
@@ -338,11 +370,11 @@
           [["Species", p.FullName], ["Height", p.Height ? p.Height + " ft" : "not recorded"],
            ["Crown spread", p.Spread ? p.Spread + " ft" : "not recorded"],
            ["Trunk diameter", p.Diameter ? p.Diameter + " in" : "not recorded"],
-           ["Condition", p.ConditionAssesment], ["Planted", p.InstallYear],
-           ["Location", p.LocationName], ["Address", p.Address], ["Site type", p.SiteType]]
+           ["Condition", p.ConditionAssesment],
+           ["Location", p.LocationName], ["Site type", p.SiteType]]
             .filter(([, v]) => v != null && v !== "")
             .map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
-          `</tbody></table>`;
+          `</tbody></table>` + treeCommentsHtml(p);
 
         // Trunk: a thin cylinder up into the crown
         const trunkH = h * (conifer ? 0.3 : 0.5);
@@ -382,7 +414,6 @@
         }
       });
 
-      el("treeCount").textContent = `(${features.length})`;
       console.log(features.length, "trees loaded");
     }
 
@@ -613,23 +644,17 @@
       viewer.shadows = e.target.checked;
       viewer.terrainShadows = e.target.checked ? Cesium.ShadowMode.RECEIVE_ONLY : Cesium.ShadowMode.DISABLED;
     });
-    el("showTrees").addEventListener("change", e => { treeSource.show = e.target.checked; });
 
     el("count").textContent = "Loading buildings…";
     loadBuildings().catch(err => {
       console.error(err);
       el("count").textContent = "Could not load buildings: " + err.message;
     });
-    // Trees are switched off until the tree data is cleaned in QGIS.
-    // Set SHOW_TREES to true to put them back on the map.
-    const SHOW_TREES = false;
+    // Trees stream live from the City's Trees layer, clipped to the downtown boundary
+    // (same as the buildings). Set SHOW_TREES to false to take them off the map.
+    const SHOW_TREES = true;
     if (SHOW_TREES) {
-      loadTrees().catch(err => {
-        console.error(err);
-        el("treeCount").textContent = "(failed to load)";
-      });
-    } else {
-      el("showTreesRow").style.display = "none";
+      loadTrees().catch(err => console.error("Could not load trees:", err));
     }
   </script>
 </body>
