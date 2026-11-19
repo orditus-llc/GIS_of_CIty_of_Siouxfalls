@@ -224,6 +224,19 @@
         p.area_sqft = p["Shape.STArea()"] ?? null;            // City area is in square feet
       }
 
+      // --- SPLIT FOOTPRINTS: one City footprint drawn as a tall part + a low part ---
+      for (const f of features) {
+        const fix = SPLIT_FOOTPRINTS[f.properties.OBJECTID];
+        if (!fix) continue;
+        const area = f.properties.area_sqft;
+        if (area == null || Math.abs(area - fix.expectAreaSqft) > 5) {
+          console.warn(`Footprint ${f.properties.OBJECTID} changed at the City; split not applied`);
+          continue;
+        }
+        f.geometry = { type: "Polygon", coordinates: [fix.tall.ring] };
+        f.properties.extra_parts = fix.low;
+      }
+
       // --- REMOVE BUILDINGS: put any features.filter(...) lines here ---
 
       // Check against the QGIS results (expect 383 buildings: 379 measured, 4 proposed_no_height)
@@ -275,7 +288,22 @@
         // Click popup: building type as the title, plain-language rows below
         e.name = buildingType(p.STRUCTURE, structureNames);
         e.description = popupHtml(p);
-        buildings.push({ entity: e, props: p });
+
+        // Extra low parts of a split footprint: same popup, colored and shown with the main part
+        const parts = (p.extra_parts || []).map(part => {
+          const ground = corners[i].map(c => c.height || 0);
+          return ds.entities.add({
+            name: e.name, description: e.description,
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(part.ring.flat()),
+              height: Math.min(...ground) - 0.5,
+              extrudedHeight: ground.reduce((a, b) => a + b, 0) / ground.length + part.heightFt * FT_TO_M,
+              outline: true, outlineColor: Cesium.Color.BLACK.withAlpha(0.45), outlineWidth: 1,
+              shadows: Cesium.ShadowMode.ENABLED,
+            },
+          });
+        });
+        buildings.push({ entity: e, props: p, parts });
       });
       viewer.dataSources.add(ds);
       applyStyle();
@@ -473,6 +501,32 @@
       233281: "Height corrected to 42 ft (City value 4.1 ft; 3-story townhomes)",
       250262: "2 stories but 56.8 ft (28 ft per story): check on aerial imagery",
       207414: "4 Multi-Family addresses but UNITS = 0, likely missing",
+      260635: "Falls Park Visitor Center & Observation Tower. City gives one height (67.3 ft, 7 stories) for the whole footprint; " +
+              "drawn as the tower at 67.3 ft plus the 1-story visitor center estimated at 9.6 ft (67.3 ft ÷ 7 stories)",
+    };
+
+    // City footprints drawn as two parts (a tall part + a low part). Coordinates are the
+    // City's own footprint vertices, split along the wall between the parts. The split is
+    // skipped if the City changes the footprint (area no longer matches).
+    const SPLIT_FOOTPRINTS = {
+      260635: {  // Falls Park Visitor Center: observation tower + 1-story curved building (City photo 2025)
+        expectAreaSqft: 2932.27,
+        tall: { ring: [  // observation tower, City height 67.3 ft
+          [-96.72233122810884, 43.55829958552212], [-96.72235635068282, 43.55820712610365],
+          [-96.72247520447362, 43.55822420639327], [-96.72245008207226, 43.55831666584148],
+          [-96.72233122810884, 43.55829958552212]] },
+        low: [{ heightFt: 67.28 / 7, ring: [  // curved visitor center, 1 story = average story height
+          [-96.72247087614706, 43.55824013976089], [-96.72248913472222, 43.55824219548996],
+          [-96.72252501362118, 43.55824343279795], [-96.72256084492952, 43.5582419247753],
+          [-96.72259628867835, 43.558237690757686], [-96.72263088992787, 43.558230778402965],
+          [-96.7226643066417, 43.55822126192997], [-96.72269619439426, 43.558209246123354],
+          [-96.72271327980246, 43.558201463349015], [-96.72276276054302, 43.55825434576779],
+          [-96.72273147128364, 43.55826950235493], [-96.72269827184078, 43.558282287970336],
+          [-96.7226634669827, 43.55829259883931], [-96.72262740103358, 43.55830033287612],
+          [-96.72259045546703, 43.55830538783539], [-96.72255300724869, 43.55830771540543],
+          [-96.72251355291746, 43.558308542557356], [-96.72247626173716, 43.55830607868651],
+          [-96.72245372172246, 43.5583032704375], [-96.72247087614706, 43.55824013976089]] }],
+      },
     };
 
     // STRUCTURE code hundreds digit -> use group
@@ -559,7 +613,7 @@
       const counts = {};
       const filterCounts = {};
       let shown = 0;
-      for (const { entity, props: p } of buildings) {
+      for (const { entity, props: p, parts } of buildings) {
         let key = mode.classify(p);
         if (!mode.classes.some(c => c.key === key)) key = "other";
         const cls = mode.classes.find(c => c.key === key);
@@ -574,6 +628,7 @@
 
         if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
         entity.show = passesFilters && !off.has(key);
+        for (const part of parts) { part.polygon.material = cls.cesiumColor; part.show = entity.show; }
         if (entity.show) shown++;
       }
 
