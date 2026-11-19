@@ -224,6 +224,9 @@
         p.area_sqft = p["Shape.STArea()"] ?? null;            // City area is in square feet
       }
 
+      // --- NAMES AND HISTORIC LANDMARKS: matched to footprints by location (before any split) ---
+      await addNamesAndHistory(features);
+
       // --- SPLIT FOOTPRINTS: one City footprint drawn as a tall part + a low part ---
       for (const f of features) {
         const fix = SPLIT_FOOTPRINTS[f.properties.OBJECTID];
@@ -285,9 +288,29 @@
           e.polygon.outline = false;
           e.polygon.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
         }
-        // Click popup: building type as the title, plain-language rows below
-        e.name = buildingType(p.STRUCTURE, structureNames);
-        e.description = popupHtml(p);
+        // Click popup: building name (or type) as the title, plain-language rows below
+        const type = buildingType(p.STRUCTURE, structureNames);
+        e.name = buildingTitle(p, type);
+        e.description = popupHtml(p, type, e.name);
+
+        // Historic landmark: an icon floating above the roof (click it for the same popup)
+        const icons = [];
+        if (p.historic.length) {
+          const ground = corners[i].map(c => c.height || 0);
+          const top = ground.reduce((a, b) => a + b, 0) / ground.length + (heightFt || 0) * FT_TO_M;
+          const lon = corners[i].reduce((a, c) => a + c.longitude, 0) / corners[i].length;
+          const lat = corners[i].reduce((a, c) => a + c.latitude, 0) / corners[i].length;
+          icons.push(ds.entities.add({
+            name: e.name, description: e.description,
+            position: Cesium.Cartesian3.fromRadians(lon, lat, top + 4),
+            billboard: {
+              image: HISTORIC_ICON, width: 30, height: 30,
+              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,   // never hidden inside the building
+              scaleByDistance: new Cesium.NearFarScalar(500, 1.0, 8000, 0.5),
+            },
+          }));
+        }
 
         // Extra low parts of a split footprint: same popup, colored and shown with the main part
         const parts = (p.extra_parts || []).map(part => {
@@ -303,7 +326,7 @@
             },
           });
         });
-        buildings.push({ entity: e, props: p, parts });
+        buildings.push({ entity: e, props: p, parts, icons });
       });
       viewer.dataSources.add(ds);
       applyStyle();
@@ -470,11 +493,27 @@
       return name ? name.replace(/^\d+\s*/, "").replace(" - ", " – ") : "Building";
     }
 
+    // Popup title: historic name, else the building's own name(s), else the building type
+    function buildingTitle(p, type) {
+      if (p.historic.length) return p.historic[0].DESCRIP;
+      if (p.names.length === 1 || p.names.length === 2) return p.names.join(" / ");
+      return type;   // no name, or 3+ names (listed in the popup instead)
+    }
+
     // The rows a visitor sees when clicking a building. Empty values are skipped.
-    function popupHtml(p) {
+    function popupHtml(p, type, title) {
       const fmt = n => Math.round(n).toLocaleString("en-US");
       const useClass = MODES.use.classes.find(c => c.key === p.use_group);
+      const otherNames = p.names.filter(n => !title.includes(n));
+      // Office building without its own name: list the businesses registered at its address points
+      const tenants = OFFICE_CODES.has(p.STRUCTURE) && !p.names.length && p.tenants.length
+        ? p.tenants.slice(0, 15).join(", ") + (p.tenants.length > 15 ? `, and ${p.tenants.length - 15} more` : "")
+        : null;
       const rows = [
+        ["Building type",         title !== type ? type : null],
+        [title === type ? "Names" : "Also known as", otherNames.length ? otherNames.join(", ") : null],
+        ["Businesses inside",     tenants],
+        ["Address",               p.addresses.length ? p.addresses.slice(0, 3).join("; ") : null],
         ["Use",                   useClass && useClass.label],
         ["Height",                p.bldg_height != null ? `${fmt(p.bldg_height)} ft` : null],
         ["Stories",               p.NUMBERSTORIES || null],
@@ -488,8 +527,129 @@
       ].filter(([, v]) => v != null && v !== "");
       return `<table class="cesium-infoBox-defaultTable"><tbody>` +
         rows.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
-        `</tbody></table>` +
-        `<p style="font-size:11px;color:#aaa;margin:8px 4px">City building ID ${p.OBJECTID} · Source: City of Sioux Falls</p>`;
+        `</tbody></table>` + historicHtml(p) +
+        `<p style="font-size:11px;color:#aaa;margin:8px 4px">City building ID ${p.OBJECTID} · Source: City of Sioux Falls ` +
+        `(Building Footprints, Address Points${p.historic.length ? ", Historic Properties" : ""})</p>`;
+    }
+
+    // "Quick facts" box for historic landmarks (City Historic Properties layer)
+    function historicHtml(p) {
+      const when = v => v == null || v === "" ? "" : typeof v === "number" ? ` (${new Date(v).toISOString().slice(0, 10)})` : ` (${v})`;
+      return p.historic.map(h => {
+        const rows = [
+          ["Name",       h.DESCRIP],
+          ["Year built", h.YEARBUILT],
+          ["Address",    h.LOCATION],
+          ["National Register of Historic Places", h.NATIONAL_REGISTER === "Yes" ? "Listed" + when(h.NATIONAL_REG_DATE) : null],
+          ["Sioux Falls local historic register",  h.LOCAL_REGISTER === "Yes" ? "Listed" + when(h.LOCAL_REG_DATE) : null],
+        ].filter(([, v]) => v != null && v !== "");
+        return `<div style="margin:8px 0;padding:6px 8px;border-left:3px solid #d4a017;background:rgba(212,160,23,0.12)">` +
+          `<b>🏛 Historic landmark: quick facts</b>` +
+          `<table class="cesium-infoBox-defaultTable" style="margin-top:4px"><tbody>` +
+          rows.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).join("");
+    }
+
+    // ===== BUILDING NAMES AND HISTORIC LANDMARKS =====
+
+    const ADDRESS_URL  = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Property/MapServer/0";    // Address Points
+    const HISTORIC_URL = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Community/MapServer/13";  // Historic Properties
+    const OFFICE_CODES = new Set([310, 311, 330, 331]);   // STRUCTURE codes for office buildings
+
+    const HISTORIC_ICON = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">` +
+      `<circle cx="18" cy="18" r="16" fill="#8a5a00" stroke="#fff" stroke-width="2"/>` +
+      `<path fill="#fff" d="M18 8 L28 13 H8 Z M10 14 h16 v2 H10 Z M11 17 h2.5 v7 H11 Z ` +
+      `M16.75 17 h2.5 v7 h-2.5 Z M22.5 17 h2.5 v7 H22.5 Z M9 25 h18 v2.5 H9 Z"/></svg>`);
+
+    // Is (x, y) inside a polygon given as GeoJSON rings? (even-odd rule, holes included)
+    function inRings(x, y, rings) {
+      let inside = false;
+      for (const ring of rings) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const [x1, y1] = ring[i], [x2, y2] = ring[j];
+          if ((y1 > y) !== (y2 > y) && x < x1 + (y - y1) * (x2 - x1) / (y2 - y1)) inside = !inside;
+        }
+      }
+      return inside;
+    }
+    const polygonsOf = g => !g ? [] : g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
+
+    // Give every building: names (building-level address names), tenants (unit/suite names),
+    // addresses, and historic (Historic Properties records). Address points and footprints share
+    // no ID, so a point belongs to the footprint it sits in. Historic properties are matched by
+    // their address first; if that fails, to the footprint most inside the historic parcel.
+    async function addNamesAndHistory(features) {
+      for (const f of features) Object.assign(f.properties, { names: [], tenants: [], addresses: [], historic: [] });
+      let points, historic;
+      try {
+        [points, historic] = await Promise.all([
+          queryDowntown(ADDRESS_URL, "Addresses", { outFields: "ADDRESS,ALIAS,POINTTYPE" }),
+          queryDowntown(HISTORIC_URL, "Historic", { outFields: "DESCRIP,LOCATION,YEARBUILT,LOCAL_REGISTER,LOCAL_REG_DATE,NATIONAL_REGISTER,NATIONAL_REG_DATE" }),
+        ]);
+      } catch (err) {
+        console.warn("Building names / historic landmarks not loaded", err);
+        return;
+      }
+
+      const boxes = features.map(f => {
+        const polys = polygonsOf(f.geometry), xs = [], ys = [];
+        for (const rings of polys) for (const [x, y] of rings[0]) { xs.push(x); ys.push(y); }
+        return { f, polys, minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+      });
+      const footprintAt = (x, y) => boxes.find(b =>
+        x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && b.polys.some(r => inRings(x, y, r)));
+
+      const byAddress = new Map();   // ADDRESS -> footprints containing a point with that address
+      const otherAddresses = new Map();
+      for (const pt of points) {
+        if (!pt.geometry) continue;
+        const b = footprintAt(...pt.geometry.coordinates);
+        if (!b) continue;
+        const p = b.f.properties;
+        const { ADDRESS, ALIAS, POINTTYPE } = pt.properties;
+        const isBuilding = POINTTYPE === "Building";
+        if (ADDRESS) {
+          if (!byAddress.has(ADDRESS)) byAddress.set(ADDRESS, new Set());
+          byAddress.get(ADDRESS).add(b.f);
+          const list = isBuilding ? p.addresses : (otherAddresses.get(p) || otherAddresses.set(p, []).get(p));
+          if (!list.includes(ADDRESS)) list.push(ADDRESS);
+        }
+        const name = (ALIAS || "").trim();
+        if (!name) continue;
+        const list = isBuilding ? p.names : p.tenants;
+        if (!list.includes(name)) list.push(name);
+      }
+      for (const { f: { properties: p } } of boxes) {
+        p.tenants = p.tenants.filter(n => !p.names.includes(n)).sort();
+        if (!p.addresses.length) p.addresses = otherAddresses.get(p) || [];   // no building-level point
+      }
+
+      for (const h of historic) {
+        const hp = h.properties;
+        let matched = [...(byAddress.get((hp.LOCATION || "").toUpperCase().trim()) || [])];
+        if (!matched.length) {
+          const hPolys = polygonsOf(h.geometry);
+          let best = null, bestKey = null;
+          for (const b of boxes) {
+            const corners = b.polys.flatMap(rings => rings[0].slice(0, -1));
+            const share = corners.filter(([x, y]) => hPolys.some(r => inRings(x, y, r))).length / corners.length;
+            if (!share) continue;
+            // prefer: not a detached structure, at least half inside the parcel, then the largest
+            const key = [b.f.properties.is_accessory ? 0 : 1, share >= 0.5 ? 1 : 0, b.f.properties.area_sqft || 0];
+            const better = !bestKey || key[0] !== bestKey[0] ? !bestKey || key[0] > bestKey[0]
+                         : key[1] !== bestKey[1] ? key[1] > bestKey[1]
+                         : key[2] > bestKey[2];
+            if (better) { best = b.f; bestKey = key; }
+          }
+          if (best) matched = [best];
+        }
+        for (const f of matched) f.properties.historic.push(hp);
+      }
+      const named = features.filter(f => f.properties.names.length).length;
+      const hist = features.filter(f => f.properties.historic.length).length;
+      console.log(`${named} buildings named, ${hist} historic landmarks matched`);
     }
 
     // QA notes from the deep dive, keyed by OBJECTID
@@ -599,6 +759,7 @@
       { key: "accessory", label: "Detached structures: garages, storage, park shelters…", match: p => p.is_accessory },
       { key: "proposed",  label: "Proposed: not constructed yet", match: p => p.height_flag === "proposed_no_height" },
       { key: "small",     label: "Footprints under 150 sq ft", match: p => p.area_sqft != null && p.area_sqft < 150 },
+      { key: "historic",  label: "🏛 Historic landmarks", match: p => p.historic && p.historic.length > 0 },
     ];
     const filtersOn = new Set();  // keys of SHOW_FILTERS picked; when any are picked, only those buildings show
 
@@ -613,7 +774,7 @@
       const counts = {};
       const filterCounts = {};
       let shown = 0;
-      for (const { entity, props: p, parts } of buildings) {
+      for (const { entity, props: p, parts, icons } of buildings) {
         let key = mode.classify(p);
         if (!mode.classes.some(c => c.key === key)) key = "other";
         const cls = mode.classes.find(c => c.key === key);
@@ -629,6 +790,7 @@
         if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
         entity.show = passesFilters && !off.has(key);
         for (const part of parts) { part.polygon.material = cls.cesiumColor; part.show = entity.show; }
+        for (const icon of icons) icon.show = entity.show;
         if (entity.show) shown++;
       }
 
