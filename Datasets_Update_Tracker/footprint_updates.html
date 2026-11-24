@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building Footprints Changes</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6677; --line: #e2e5ea;
+          --accent: #2f6fdb; --add: #15803d; --add-bg: #dcf3e3; --del: #b91c1c; --del-bg: #fde2e2; --edit: #9a5b00; --edit-bg: #fdf0dc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --card: #1d2128; --text: #e6e9ee; --muted: #9aa3b2; --line: #2e343e;
+            --accent: #6ea2f5; --add: #4ade80; --add-bg: #17301f; --del: #f87171; --del-bg: #3a1818; --edit: #f0a54a; --edit-bg: #3a2c17; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .tag { border-radius: 99px; padding: 2px 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tag.add { background: var(--add-bg); color: var(--add); }
+  .tag.del { background: var(--del-bg); color: var(--del); }
+  .tag.edit { background: var(--edit-bg); color: var(--edit); }
+  .spacer { flex: 1; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--accent); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+  td.id { white-space: nowrap; }
+  .before { color: var(--del); text-decoration: line-through; text-decoration-thickness: 1px; }
+  .after { color: var(--add); }
+  .muted { color: var(--muted); }
+  .big { font-size: 1.15rem; margin: 0; }
+  .error { color: var(--del); }
+  progress { width: 100%; height: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sioux Falls Building Footprints: changes</h1>
+  <p class="sub" style="margin-bottom:4px"><a href="https://www.arcgis.com/home/item.html?id=3ca4a96b2f5847fdbac6568c6dc20ee3&amp;sublayer=5&amp;dataTabView=table" target="_blank" rel="noopener">Data source: City of Sioux Falls, Building Footprints ↗</a></p>
+  <p class="sub" id="sub">Loading…</p>
+  <section class="card" id="out"><progress id="prog" max="1" value="0"></progress></section>
+</main>
+
+<script>
+const LAYER = "https://gis.siouxfalls.gov/arcgis/rest/services/Data/Property/MapServer/5";
+const DB = "sf-footprints", STORE = "snapshots", KEY = "baseline";
+const SHOW_MAX = 300;   // rows shown on the page; the CSV has everything
+const SHOW_FIELDS_NEW = ["STATUS", "STRUCTURE", "CAPTUREMETH", "COMMENTS"];  // summary for added/removed buildings
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const when = iso => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || "server error");
+  return j;
+}
+const q = params => LAYER + "/query?" + new URLSearchParams({ f: "json", ...params });
+
+// ---------- snapshot of every building's attributes ----------
+async function fetchSnapshot(onProgress) {
+  const ids = (await getJSON(q({ where: "1=1", returnIdsOnly: true }))).objectIds.sort((a, b) => a - b);
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 1000) chunks.push([ids[i], ids[Math.min(i + 999, ids.length - 1)]]);
+  const total = chunks.length, rows = {};
+  let fields = null, done = 0;
+  const worker = async () => {
+    while (chunks.length) {
+      const [a, b] = chunks.shift();
+      const j = await getJSON(q({ where: `OBJECTID BETWEEN ${a} AND ${b}`, outFields: "*", returnGeometry: false }));
+      if (j.exceededTransferLimit) throw new Error("server returned a partial page; try again");
+      for (const f of j.features) {
+        fields ??= Object.keys(f.attributes);
+        rows[f.attributes.OBJECTID] = fields.map(k => f.attributes[k]);
+      }
+      onProgress(++done / total);
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return { time: new Date().toISOString(), fields, rows };
+}
+
+// ---------- compare two snapshots ----------
+const same = (a, b) => a === b ||
+  (blank(a) && blank(b)) ||
+  (typeof a === "number" && typeof b === "number" && Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a)));
+const blank = v => v == null || String(v).trim() === "";
+
+function compare(base, cur) {
+  const bi = Object.fromEntries(base.fields.map((f, i) => [f, i]));
+  const edited = [], added = [], removed = [];
+  for (const id in cur.rows) {
+    const b = base.rows[id], c = cur.rows[id];
+    if (!b) { added.push(id); continue; }
+    const changes = [];
+    cur.fields.forEach((f, i) => { if (f !== "OBJECTID" && f in bi && !same(b[bi[f]], c[i])) changes.push({ field: f, before: b[bi[f]], after: c[i] }); });
+    if (changes.length) edited.push({ id, changes });
+  }
+  for (const id in base.rows) if (!(id in cur.rows)) removed.push(id);
+  return { edited, added, removed };
+}
+
+// ---------- labels and value formatting ----------
+let FIELD_INFO = {};   // name -> {alias, type, domain}
+function labelOf(f) {
+  if (f === "Shape.STArea()") return "Footprint area (sq ft)";
+  if (f === "Shape.STLength()") return "Perimeter (ft)";
+  return FIELD_INFO[f]?.alias || f;
+}
+function show(f, v) {
+  if (blank(v)) return "(blank)";
+  const info = FIELD_INFO[f] || {};
+  if (info.domain?.[v] != null) return info.domain[v];
+  if (info.type === "esriFieldTypeDate") return new Date(v).toLocaleDateString([], { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
+  if (typeof v === "number" && !Number.isInteger(v)) return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return typeof v === "number" ? v.toLocaleString() : String(v);
+}
+const valOf = (snap, id, f) => snap.rows[id]?.[snap.fields.indexOf(f)];
+const summaryOf = (snap, id) => SHOW_FIELDS_NEW.map(f => `${labelOf(f)}: ${esc(show(f, valOf(snap, id, f)))}`).join(" · ");
+
+// ---------- saved baseline (this browser, IndexedDB) ----------
+function openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function loadBaseline() {
+  const db = await openDB();
+  return new Promise((res, rej) => { const g = db.transaction(STORE).objectStore(STORE).get(KEY); g.onsuccess = () => res(g.result || null); g.onerror = () => rej(g.error); });
+}
+async function saveBaseline(snap) {
+  const db = await openDB();
+  return new Promise((res, rej) => { const tx = db.transaction(STORE, "readwrite"); tx.objectStore(STORE).put(snap, KEY); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+}
+
+// ---------- render ----------
+function changeRows(diff, base, cur) {
+  const rows = [];
+  for (const id of diff.added) rows.push({ id, kind: "Added", field: "", before: "", after: summaryOf(cur, id), html: true });
+  for (const id of diff.removed) rows.push({ id, kind: "Removed", field: "", before: summaryOf(base, id), after: "", html: true });
+  for (const e of diff.edited) for (const c of e.changes)
+    rows.push({ id: e.id, kind: "Edited", field: labelOf(c.field), before: show(c.field, c.before), after: show(c.field, c.after) });
+  return rows.sort((a, b) => b.id - a.id);
+}
+
+function downloadCSV(rows, since) {
+  const strip = s => String(s).replace(/<[^>]+>/g, "");
+  const cell = s => `"${strip(s).replace(/&amp;/g, "&").replace(/"/g, '""')}"`;
+  const csv = ["OBJECTID,Change,Field,Before,After", ...rows.map(r => [r.id, r.kind, r.field, r.before, r.after].map(cell).join(","))].join("\r\n");
+  const a = Object.assign(document.createElement("a"), {
+    href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
+    download: `footprint_changes_since_${since.slice(0, 10)}.csv`,
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function render(base, cur) {
+  const diff = compare(base, cur);
+  const rows = changeRows(diff, base, cur);
+  $("sub").textContent = `Changes since you last marked them as seen on ${when(base.time)}`;
+
+  if (!rows.length) {
+    $("out").innerHTML = `<p class="big">No changes since ${esc(when(base.time))}.</p>
+      <p class="muted" style="margin:6px 0 0">All ${Object.keys(cur.rows).length.toLocaleString()} buildings match what you last saw.</p>`;
+    return;
+  }
+
+  const kindTag = k => `<span class="tag ${k === "Added" ? "add" : k === "Removed" ? "del" : "edit"}">${k}</span>`;
+  const shown = rows.slice(0, SHOW_MAX);
+  $("out").innerHTML = `
+    <div class="summary">
+      ${diff.edited.length ? `<span class="tag edit">${diff.edited.length.toLocaleString()} edited</span>` : ""}
+      ${diff.added.length ? `<span class="tag add">${diff.added.length.toLocaleString()} added</span>` : ""}
+      ${diff.removed.length ? `<span class="tag del">${diff.removed.length.toLocaleString()} removed</span>` : ""}
+      <span class="spacer"></span>
+      <button id="csv">Download CSV</button>
+      <button id="seen" class="primary">Mark as seen</button>
+    </div>
+    <div class="scroll"><table>
+      <tr><th>OBJECTID</th><th>Change</th><th>Variable</th><th>Before</th><th>After</th></tr>
+      ${shown.map(r => `<tr><td class="id">${r.id}</td><td>${kindTag(r.kind)}</td><td>${esc(r.field)}</td>
+        <td class="${r.html ? "muted" : "before"}">${r.html ? r.before : esc(r.before)}</td>
+        <td class="${r.html ? "" : "after"}">${r.html ? r.after : esc(r.after)}</td></tr>`).join("")}
+    </table></div>
+    ${rows.length > SHOW_MAX ? `<p class="muted">Showing ${SHOW_MAX} of ${rows.length.toLocaleString()} changes. Download the CSV for all of them.</p>` : ""}`;
+
+  $("csv").onclick = () => downloadCSV(rows, base.time);
+  $("seen").onclick = async () => {
+    $("seen").disabled = true;
+    await saveBaseline(cur);
+    render(cur, cur);
+  };
+}
+
+(async () => {
+  try {
+    const info = await getJSON(LAYER + "?f=json");
+    for (const f of info.fields) FIELD_INFO[f.name] = {
+      alias: f.alias, type: f.type,
+      domain: f.domain?.codedValues ? Object.fromEntries(f.domain.codedValues.map(c => [c.code, c.name])) : null,
+    };
+  } catch (e) {
+    $("sub").innerHTML = `<span class="error">Can't reach the City of Sioux Falls server: ${esc(e.message)}</span>`;
+    $("out").hidden = true;
+    return;
+  }
+
+  let base = null;
+  try { base = await loadBaseline(); }
+  catch { $("sub").innerHTML = `<span class="error">This browser is blocking site storage, so the page can't remember what you've seen.</span>`; }
+
+  let cur;
+  try {
+    $("sub").textContent = "Downloading the current state of every building…";
+    cur = await fetchSnapshot(p => $("prog").value = p);
+  } catch (e) {
+    $("sub").innerHTML = `<span class="error">Download from the City server failed: ${esc(e.message)}. Refresh to try again.</span>`;
+    return;
+  }
+
+  if (!base) {
+    try { await saveBaseline(cur); } catch {}
+    $("sub").textContent = `First visit · ${when(cur.time)}`;
+    $("out").innerHTML = `<p class="big">Saved the current state of ${Object.keys(cur.rows).length.toLocaleString()} buildings.</p>
+      <p class="muted" style="margin:6px 0 0">Next time you open this page, anything the City has added, removed or edited since now will be listed here,
+      with the variable that changed and its old and new values.</p>`;
+    return;
+  }
+  render(base, cur);
+})();
+</script>
+</body>
+</html>
