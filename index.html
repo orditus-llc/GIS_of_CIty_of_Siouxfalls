@@ -41,6 +41,16 @@
       margin-top: 4px; cursor: pointer; background: #555; color: #fff;
       border: 0; border-radius: 3px; padding: 2px 8px; font: inherit;
     }
+
+    /* Data credit / disclaimer bar along the bottom of the map */
+    #footer {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 10;
+      background: rgba(38, 38, 38, 0.88); color: #ddd;
+      padding: 4px 12px; font: 11px/1.4 sans-serif; text-align: center;
+    }
+    #footer a { color: #9cc9ff; }
+    /* keep Cesium's own credits (bottom-left) above the bar; height set by script */
+    .cesium-viewer-bottom { bottom: var(--footer-h, 24px); }
   </style>
 </head>
 <body>
@@ -67,6 +77,19 @@
     <div id="legend"></div>
     <div id="count"></div>
   </div>
+
+  <div id="footer">
+    Data © City of Sioux Falls, licensed under
+    <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>.
+    Changes are computed by Orditus and are not an official City record.
+    Not affiliated with or endorsed by the City of Sioux Falls. For reference only.
+  </div>
+  <script>
+    // Move Cesium's credit line above the footer bar (the bar wraps to more lines on phones)
+    const footerBar = document.getElementById("footer");
+    new ResizeObserver(() => document.documentElement.style.setProperty("--footer-h", footerBar.offsetHeight + "px"))
+      .observe(footerBar);
+  </script>
   <script>
     // Your Cesium ion token (ion.cesium.com -> Access Tokens).
     // Leave the placeholder here in the repo: the GitHub Actions deploy
