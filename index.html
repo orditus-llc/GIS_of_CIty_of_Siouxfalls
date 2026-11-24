@@ -374,7 +374,7 @@
       ["Contractor", "Contractor"], ["ContractorCutNotes", "Contractor notes"],
       ["PhotoURL", "Photo"], ["Risk", "Risk"],   // Risk last: "comment at the bottom"
     ];
-    const TREE_FIELDS = "OBJECTID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,LocationName,"
+    const TREE_FIELDS = "OBJECTID,TreeID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,LocationName,"
                       + TREE_COMMENTS.map(([f]) => f).join(",");
     const treeSource = new Cesium.CustomDataSource("Trees");
     viewer.dataSources.add(treeSource);
@@ -451,7 +451,9 @@
            ["Location", p.LocationName], ["Site type", p.SiteType]]
             .filter(([, v]) => v != null && v !== "")
             .map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
-          `</tbody></table>` + treeCommentsHtml(p);
+          `</tbody></table>` + treeCommentsHtml(p) +
+          `<p style="font-size:11px;color:#aaa;margin:8px 4px">City tree ID ${esc(p.TreeID || "—")} ` +
+          `(record ${p.OBJECTID}) · Source: City of Sioux Falls (Trees)</p>`;
 
         // Trunk: a thin cylinder up into the crown
         const trunkH = h * (conifer ? 0.3 : 0.5);
