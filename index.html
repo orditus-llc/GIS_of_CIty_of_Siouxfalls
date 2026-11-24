@@ -42,6 +42,24 @@
       border: 0; border-radius: 3px; padding: 2px 8px; font: inherit;
     }
 
+    /* "Find a place" search box */
+    #search {
+      width: 100%; box-sizing: border-box; margin-bottom: 4px; padding: 5px 8px;
+      border: 1px solid #666; border-radius: 4px; background: #1e1e1e; color: #fff; font: inherit;
+    }
+    #searchResults { max-height: 260px; overflow-y: auto; }
+    .search-result {
+      display: block; width: 100%; text-align: left; cursor: pointer;
+      background: none; border: 0; border-radius: 3px; padding: 4px 6px; color: #fff; font: inherit;
+    }
+    .search-result:hover, .search-result:focus { background: rgba(255, 255, 255, 0.12); outline: none; }
+    .search-result small { display: block; color: #aaa; font-size: 11px; }
+    .search-result.none { cursor: default; opacity: 0.7; }
+    .search-chip {
+      display: block; margin: 4px 0; cursor: pointer; background: #2f5d3a; color: #fff;
+      border: 0; border-radius: 3px; padding: 2px 8px; font: inherit; text-align: left;
+    }
+
     /* Data credit / disclaimer bar along the top of the map */
     #footer {
       position: absolute; left: 0; right: 0; top: 0; z-index: 10;
@@ -61,6 +79,14 @@
 
   <div id="panel">
     <h3>Downtown Sioux Falls</h3>
+    <input id="search" type="search" autocomplete="off"
+           placeholder="Find a place: church, hotel, name, address…" aria-label="Find a place">
+    <div class="hint" style="color:#aaa;font-size:11px;margin:0 0 4px">
+      Search uses the City's building types and listed names, so places missing from the City's data may not appear.
+      Click a building to see its listed names.
+    </div>
+    <div id="searchResults"></div>
+    <div id="searchActive"></div>
     <label>Color by
       <select id="colorBy">
         <option value="stories">Number of stories</option>
@@ -316,6 +342,7 @@
         }
         // Click popup: building name (or type) as the title, plain-language rows below
         const type = buildingType(p.STRUCTURE, structureNames);
+        p.type_name = type;   // used by the search box
         e.name = buildingTitle(p, type);
         e.description = popupHtml(p, type, e.name);
 
@@ -376,6 +403,7 @@
     ];
     const TREE_FIELDS = "OBJECTID,TreeID,SiteType,FullName,TreeType,Height,Spread,Diameter,ConditionAssesment,LocationName,"
                       + TREE_COMMENTS.map(([f]) => f).join(",");
+    const trees = [];  // { props, entities } for every tree (trunk + crown shapes)
     const treeSource = new Cesium.CustomDataSource("Trees");
     viewer.dataSources.add(treeSource);
 
@@ -455,6 +483,8 @@
           `<p style="font-size:11px;color:#aaa;margin:8px 4px">City tree ID ${esc(p.TreeID || "—")} ` +
           `(record ${p.OBJECTID}) · Source: City of Sioux Falls (Trees)</p>`;
 
+        const firstEntity = treeSource.entities.values.length;  // this tree's shapes start here
+
         // Trunk: a thin cylinder up into the crown
         const trunkH = h * (conifer ? 0.3 : 0.5);
         treeSource.entities.add({
@@ -491,7 +521,9 @@
             },
           });
         }
+        trees.push({ props: p, entities: treeSource.entities.values.slice(firstEntity) });
       });
+      applyTreeFilter();
 
       console.log(features.length, "trees loaded");
     }
@@ -521,10 +553,11 @@
       return name ? name.replace(/^\d+\s*/, "").replace(" - ", " – ") : "Building";
     }
 
-    // Popup title: historic name, else the building's own name(s), else the building type
+    // Popup title: the building's current name(s), else its historic name, else the building type.
+    // (e.g. "Washington Pavilion", not its historic name "Washington High School")
     function buildingTitle(p, type) {
-      if (p.historic.length) return p.historic[0].DESCRIP;
       if (p.names.length === 1 || p.names.length === 2) return p.names.join(" / ");
+      if (p.historic.length) return p.historic[0].DESCRIP;
       return type;   // no name, or 3+ names (listed in the popup instead)
     }
 
@@ -555,19 +588,22 @@
       ].filter(([, v]) => v != null && v !== "");
       return `<table class="cesium-infoBox-defaultTable"><tbody>` +
         rows.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join("") +
-        `</tbody></table>` + historicHtml(p) +
+        `</tbody></table>` + historicHtml(p, title) +
         `<p style="font-size:11px;color:#aaa;margin:8px 4px">City building ID ${p.OBJECTID} · Source: City of Sioux Falls ` +
         `(Building Footprints, Address Points${p.historic.length ? ", Historic Properties" : ""})</p>`;
     }
 
     // "Quick facts" box for historic landmarks (City Historic Properties layer)
-    function historicHtml(p) {
+    function historicHtml(p, title) {
       const when = v => v == null || v === "" ? "" : typeof v === "number" ? ` (${new Date(v).toISOString().slice(0, 10)})` : ` (${v})`;
+      const sameAddress = loc => p.addresses.some(a => a.toUpperCase() === String(loc || "").toUpperCase().trim());
       return p.historic.map(h => {
         const rows = [
-          ["Name",       h.DESCRIP],
+          // historic name only when the title shows a different (current) name
+          ["Historic name", title.includes(h.DESCRIP) ? null : h.DESCRIP],
           ["Year built", h.YEARBUILT],
-          ["Address",    h.LOCATION],
+          // the register's address only when it differs from the building's current address
+          ["Address on the register", sameAddress(h.LOCATION) ? null : h.LOCATION],
           ["National Register of Historic Places", h.NATIONAL_REGISTER === "Yes" ? "Listed" + when(h.NATIONAL_REG_DATE) : null],
           ["Sioux Falls local historic register",  h.LOCAL_REGISTER === "Yes" ? "Listed" + when(h.LOCAL_REG_DATE) : null],
         ].filter(([, v]) => v != null && v !== "");
@@ -813,7 +849,8 @@
 
         const passesFilters =
           (filtersOn.size === 0 || groups.some(f => filtersOn.has(f.key))) &&
-          (minHeight === 0 || (p.bldg_height != null && p.bldg_height >= minHeight));
+          (minHeight === 0 || (p.bldg_height != null && p.bldg_height >= minHeight)) &&
+          (!searchOnly || searchOnly.ids.has(p.OBJECTID));
 
         if (passesFilters) counts[key] = (counts[key] || 0) + 1;  // legend counts ignore legend toggles
         entity.show = passesFilters && !off.has(key);
@@ -824,6 +861,7 @@
 
       renderShowFilters(filterCounts);
       renderLegend(mode, off, counts);
+      renderSearchActive();
       el("count").textContent = `${shown} of ${buildings.length} buildings shown`;
     }
 
@@ -876,6 +914,166 @@
         legend.appendChild(reset);
       }
     }
+
+    // ===== FIND A PLACE (search box) =====
+
+    // Kinds of places a visitor may look for, by the City's STRUCTURE codes (Building Footprints)
+    const CATEGORIES = [
+      { label: "Schools & colleges",           codes: [451, 452, 453], words: ["school", "college", "university", "education"] },
+      { label: "Hospitals & medical clinics",  codes: [431, 432],      words: ["hospital", "clinic", "medical", "health", "doctor"] },
+      { label: "Churches & places of worship", codes: [420],           words: ["church", "worship", "chapel", "cathedral", "temple", "mosque", "synagogue"] },
+      { label: "Libraries",                    codes: [461],           words: ["library", "books"] },
+      { label: "Museums",                      codes: [462],           words: ["museum", "gallery"] },
+      { label: "Hotels",                       codes: [515],           words: ["hotel", "motel", "lodging", "resort"] },
+      { label: "Restaurants & bars",           codes: [514],           words: ["restaurant", "bar", "food", "dining", "lounge", "pub", "cafe", "coffee"] },
+      { label: "Shops & services",             codes: [511, 513, 531], words: ["shop", "store", "retail", "shopping", "grocery"] },
+      { label: "Banks",                        codes: [320, 321],      words: ["bank", "atm"] },
+      { label: "Parking ramps",                codes: [370],           words: ["parking", "ramp", "garage"] },
+      { label: "Government buildings",         codes: [350, 366, 367], words: ["government", "city hall", "county", "courthouse", "post office"] },
+      { label: "Police, fire & public safety", codes: [361, 363],      words: ["police", "fire", "safety", "jail"] },
+      { label: "Bus & transit",                codes: [362, 365],      words: ["bus", "transit"] },
+      { label: "Offices",                      codes: [310, 311, 330, 331], words: ["office"] },
+      { label: "Homes & apartments",           codes: [110, 121, 122, 130, 210, 220], words: ["apartment", "housing", "home", "house", "residential", "condo", "townhome"] },
+      { label: "Entertainment & recreation",   codes: [410, 411, 413, 414, 470, 516], words: ["theater", "theatre", "movie", "cinema", "gym", "fitness", "arena", "event"] },
+      { label: "Care & human services",        codes: [433, 434, 435, 440, 480], words: ["daycare", "nursing", "assisted living", "group home", "human services"] },
+      { label: "Funeral homes",                codes: [436],           words: ["funeral"] },
+      { label: "Park buildings",               codes: [710, 790],      words: ["park", "shelter", "visitor"] },
+      { label: "Historic landmarks", match: p => p.historic.length > 0, words: ["historic", "landmark", "heritage"] },
+    ];
+
+    let searchOnly = null;   // { label, ids } when a search group is picked: only those buildings show
+    let treeSearch = null;   // { label, ids } when a tree species is picked: only those trees show
+
+    const inCategory = (c, p) => c.match ? c.match(p) : c.codes.includes(p.STRUCTURE);
+    // "church", "churches", "chur" all match the word "church"; "business" does not match "bus"
+    const wordHit = (w, q) => w.startsWith(q) || (q.startsWith(w) && q.length - w.length <= 2);
+
+    function applyTreeFilter() {
+      for (const t of trees) {
+        const on = !treeSearch || treeSearch.ids.has(t.props.OBJECTID);
+        for (const e of t.entities) e.show = on;
+      }
+      renderSearchActive();
+    }
+
+    // "Showing only: …  ✕" chips under the search box
+    function renderSearchActive() {
+      const box = el("searchActive");
+      box.innerHTML = "";
+      const chips = [
+        [searchOnly, () => { searchOnly = null; applyStyle(); }],
+        [treeSearch, () => { treeSearch = null; applyTreeFilter(); }],
+      ];
+      for (const [state, clear] of chips) {
+        if (!state) continue;
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "search-chip";
+        chip.textContent = `Showing only: ${state.label}  ✕`;
+        chip.title = "Click to show everything again";
+        chip.addEventListener("click", clear);
+        box.appendChild(chip);
+      }
+    }
+
+    // Show a building whatever the panel settings are, fly to it and open its popup
+    function goToBuilding(b) {
+      filtersOn.clear();
+      for (const name in hidden) hidden[name].clear();
+      el("minHeight").value = 0;
+      if (searchOnly && !searchOnly.ids.has(b.props.OBJECTID)) searchOnly = null;
+      applyStyle();
+      viewer.selectedEntity = b.entity;
+      viewer.flyTo(b.entity, { duration: 1.5, offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-35), 0) });
+    }
+
+    function showGroup(label, list) {
+      filtersOn.clear();
+      for (const name in hidden) hidden[name].clear();
+      el("minHeight").value = 0;
+      searchOnly = { label: `${label} (${list.length})`, ids: new Set(list.map(b => b.props.OBJECTID)) };
+      applyStyle();
+      if (list.length === 1) return goToBuilding(list[0]);
+      viewer.flyTo(list.map(b => b.entity), { duration: 1.5, offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 0) });
+    }
+
+    function showTrees(label, list) {
+      treeSearch = { label: `${label} (${list.length} trees)`, ids: new Set(list.map(t => t.props.OBJECTID)) };
+      applyTreeFilter();
+      viewer.flyTo(list.flatMap(t => t.entities), { duration: 1.5, offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 0) });
+    }
+
+    function runSearch(text) {
+      const q = text.trim().toLowerCase();
+      const box = el("searchResults");
+      box.innerHTML = "";
+      if (q.length < 2) return;
+      const results = [];
+
+      // 1. Kinds of places (categories)
+      for (const c of CATEGORIES) {
+        if (!c.label.toLowerCase().includes(q) && !c.words.some(w => wordHit(w, q))) continue;
+        const list = buildings.filter(b => inCategory(c, b.props));
+        results.push(list.length
+          ? { text: c.label, sub: `${list.length} building${list.length > 1 ? "s" : ""}: show them`, go: () => showGroup(c.label, list) }
+          : { text: c.label, sub: "None inside the downtown area" });
+      }
+
+      // 2. Buildings by name, landmark, business inside, address, or type (best match first)
+      const found = [];
+      for (const b of buildings) {
+        const p = b.props;
+        const fields = [[b.entity.name, 0], ...p.names.map(n => [n, 1]), ...p.historic.map(h => [h.DESCRIP, 1]),
+                        ...p.tenants.map(n => [n, 2]), ...p.addresses.map(a => [a, 3]), [p.type_name, 4]];
+        let best = null;
+        for (const [value, rank] of fields) {
+          const at = String(value || "").toLowerCase().indexOf(q);
+          if (at < 0) continue;
+          const score = rank * 2 + (at === 0 ? 0 : 1);
+          if (!best || score < best.score) best = { score, value, rank };
+        }
+        if (best) found.push({ b, ...best });
+      }
+      found.sort((x, y) => x.score - y.score || x.b.entity.name.localeCompare(y.b.entity.name));
+      for (const f of found.slice(0, 8)) {
+        const p = f.b.props;
+        const sub = f.rank === 2 ? `Inside: ${f.value}` : [p.addresses[0], p.type_name].filter(Boolean).join(" · ");
+        results.push({ text: f.b.entity.name, sub, go: () => goToBuilding(f.b) });
+      }
+      if (found.length > 8) results.push({ text: `${found.length - 8} more buildings match`, sub: "Type more to narrow it down" });
+
+      // 3. Tree species
+      const species = new Map();
+      for (const t of trees) {
+        const name = t.props.FullName || "";
+        if (name.toLowerCase().includes(q)) (species.get(name) || species.set(name, []).get(name)).push(t);
+      }
+      for (const [name, list] of [...species].sort((x, y) => y[1].length - x[1].length).slice(0, 4)) {
+        results.push({ text: `🌳 ${name}`, sub: `${list.length} tree${list.length > 1 ? "s" : ""}: show only these`, go: () => showTrees(name, list) });
+      }
+
+      if (!results.length) {
+        results.push({ text: buildings.length ? "No matches" : "Still loading…",
+                       sub: "Try a name, an address, or a word like church, hotel, parking, oak" });
+      }
+      for (const r of results) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "search-result" + (r.go ? "" : " none");
+        row.textContent = r.text;
+        const small = document.createElement("small");
+        small.textContent = r.sub || "";
+        row.appendChild(small);
+        if (r.go) row.addEventListener("click", () => { box.innerHTML = ""; r.go(); });
+        box.appendChild(row);
+      }
+    }
+
+    el("search").addEventListener("input", e => runSearch(e.target.value));
+    el("search").addEventListener("keydown", e => {
+      if (e.key === "Enter") el("searchResults").querySelector(".search-result:not(.none)")?.click();
+      if (e.key === "Escape") { e.target.value = ""; el("searchResults").innerHTML = ""; }
+    });
 
     // Wire up the panel controls
     el("colorBy").addEventListener("change", applyStyle);
